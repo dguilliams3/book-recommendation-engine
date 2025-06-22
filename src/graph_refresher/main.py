@@ -6,16 +6,16 @@ Nightly job (<60 s CPU) that:
 4. Writes top‑K neighbours ≥ similarity_threshold to student_similarity.
 5. Publishes edge‑count delta metric to Kafka topic `graph_delta`.
 """
-import asyncio, json, logging, math, time, uuid
+import asyncio, json, math, time, uuid
 from datetime import date, timedelta
 from collections import defaultdict
 
 import aiokafka, asyncpg
 from langchain_openai import OpenAIEmbeddings
 from common import SettingsInstance as S
+from common.logging import get_logger
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("graph_refresher")
+logger = get_logger(__name__)
 
 EMB = OpenAIEmbeddings(
     model="text-embedding-3-small",
@@ -28,30 +28,63 @@ def half_life_weight(days: int) -> float:
 
 async def fetch_events(conn):
     window_start = date.today() - timedelta(days=S.half_life_days * 4)
-    return await conn.fetch(
-        """SELECT c.difficulty_band, co.student_id, co.checkout_date
-               FROM checkout co
-               JOIN catalog c USING(book_id)
-              WHERE co.checkout_date >= $1""",
-        window_start,
-    )
+    logger.info("Fetching checkout events", extra={
+        "window_start": str(window_start),
+        "half_life_days": S.half_life_days,
+        "window_days": S.half_life_days * 4
+    })
+    
+    try:
+        rows = await conn.fetch(
+            """SELECT c.difficulty_band, co.student_id, co.checkout_date
+                   FROM checkout co
+                   JOIN catalog c USING(book_id)
+                  WHERE co.checkout_date >= $1""",
+            window_start,
+        )
+        logger.info("Fetched checkout events", extra={"event_count": len(rows)})
+        return rows
+    except Exception as e:
+        logger.error("Failed to fetch checkout events", exc_info=True)
+        raise
 
 async def main():
+    logger.info("Starting graph refresh process")
     t0 = time.perf_counter()
+    
+    # Connect to database
+    logger.info("Connecting to database")
     pg_url = str(S.db_url).replace("postgresql+asyncpg://", "postgresql://")
-    conn = await asyncpg.connect(pg_url)
+    try:
+        conn = await asyncpg.connect(pg_url)
+        logger.info("Database connection established")
+    except Exception as e:
+        logger.error("Failed to connect to database", exc_info=True)
+        raise
+    
+    # Fetch events
     rows = await fetch_events(conn)
 
-    # aggregate weighted tokens per student
+    # Aggregate weighted tokens per student
+    logger.info("Processing checkout events and calculating weights")
     tokens = defaultdict(list)
     today = date.today()
+    student_count = 0
+    
     for r in rows:
         d_band = r["difficulty_band"]
         days = (today - r["checkout_date"]).days
         w = half_life_weight(days)
         tokens[r["student_id"]].append((d_band, w))
+        student_count = max(student_count, len(tokens))
+    
+    logger.info("Processed events", extra={
+        "total_events": len(rows),
+        "unique_students": student_count
+    })
 
-    # build embedding docs
+    # Build embedding docs
+    logger.info("Building embedding documents")
     docs = []
     keys = []
     for sid, pairs in tokens.items():
@@ -59,59 +92,160 @@ async def main():
         doc = " ".join(t * max(1, round(w * 10)) for t, w in pairs)
         docs.append(doc or "no_history")
         keys.append(sid)
+    
+    logger.info("Generated embedding documents", extra={"document_count": len(docs)})
 
-    vectors = EMB.embed_documents(docs)
+    # Generate embeddings
+    logger.info("Generating embeddings with OpenAI")
+    try:
+        vectors = EMB.embed_documents(docs)
+        logger.info("Embeddings generated successfully", extra={
+            "vector_count": len(vectors),
+            "vector_dimension": len(vectors[0]) if vectors else 0
+        })
+    except Exception as e:
+        logger.error("Failed to generate embeddings", exc_info=True)
+        raise
 
-    await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-    await conn.execute(
-        """CREATE TABLE IF NOT EXISTS student_embeddings(
-               student_id TEXT PRIMARY KEY,
-               vec VECTOR(1536))"""
-    )
-    await conn.executemany(
-        "INSERT INTO student_embeddings VALUES($1,$2)"
-        "ON CONFLICT(student_id) DO UPDATE SET vec = EXCLUDED.vec",
-        list(zip(keys, vectors)),
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_vec_ivfflat ON student_embeddings USING ivfflat(vec) WITH (lists=32)"
-    )
-
-    # compute neighbours with pgvector operator
-    await conn.execute(
-        "CREATE TABLE IF NOT EXISTS student_similarity(a TEXT,b TEXT,sim REAL,PRIMARY KEY(a,b))"
-    )
-    await conn.execute("TRUNCATE student_similarity")
-    insert_rows = []
-    for sid in keys:
-        sims = await conn.fetch(
-            """WITH src AS (SELECT vec FROM student_embeddings WHERE student_id=$1)
-               SELECT student_id, 1-(vec <=> src.vec) AS sim
-                 FROM student_embeddings, src
-                WHERE student_id <> $1
-             ORDER BY vec <=> src.vec LIMIT 15""",
-            sid,
+    # Setup vector extension and table
+    logger.info("Setting up vector extension and table")
+    try:
+        await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS student_embeddings(
+                   student_id TEXT PRIMARY KEY,
+                   vec VECTOR(1536))"""
         )
-        insert_rows += [
-            (sid, row["student_id"], row["sim"])
-            for row in sims
-            if row["sim"] >= S.similarity_threshold
-        ]
-    await conn.executemany(
-        "INSERT INTO student_similarity VALUES($1,$2,$3)", insert_rows
-    )
-    await conn.close()
+        logger.info("Vector extension and table setup completed")
+    except Exception as e:
+        logger.error("Failed to setup vector extension/table", exc_info=True)
+        raise
 
-    producer = aiokafka.AIOKafkaProducer(bootstrap_servers=S.kafka_bootstrap)
-    await producer.start()
-    await producer.send_and_wait(
-        "graph_delta",
-        json.dumps(
-            {"edges": len(insert_rows), "timestamp": time.time(), "run_id": uuid.uuid4().hex}
-        ).encode(),
-    )
-    await producer.stop()
-    log.info("graph refresher finished: %.2f s, edges=%d", time.perf_counter() - t0, len(insert_rows))
+    # Insert embeddings
+    logger.info("Inserting student embeddings")
+    try:
+        await conn.executemany(
+            "INSERT INTO student_embeddings VALUES($1,$2)"
+            "ON CONFLICT(student_id) DO UPDATE SET vec = EXCLUDED.vec",
+            list(zip(keys, vectors)),
+        )
+        logger.info("Student embeddings inserted successfully", extra={"embedding_count": len(keys)})
+    except Exception as e:
+        logger.error("Failed to insert embeddings", exc_info=True)
+        raise
+
+    # Create index
+    logger.info("Creating vector index")
+    try:
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vec_ivfflat ON student_embeddings USING ivfflat(vec) WITH (lists=32)"
+        )
+        logger.info("Vector index created successfully")
+    except Exception as e:
+        logger.error("Failed to create vector index", exc_info=True)
+        raise
+
+    # Compute neighbours with pgvector operator
+    logger.info("Computing student similarities")
+    try:
+        await conn.execute(
+            "CREATE TABLE IF NOT EXISTS student_similarity(a TEXT,b TEXT,sim REAL,PRIMARY KEY(a,b))"
+        )
+        await conn.execute("TRUNCATE student_similarity")
+        logger.info("Student similarity table prepared")
+    except Exception as e:
+        logger.error("Failed to prepare similarity table", exc_info=True)
+        raise
+    
+    insert_rows = []
+    similarity_count = 0
+    
+    for i, sid in enumerate(keys):
+        try:
+            sims = await conn.fetch(
+                """WITH src AS (SELECT vec FROM student_embeddings WHERE student_id=$1)
+                   SELECT student_id, 1-(vec <=> src.vec) AS sim
+                     FROM student_embeddings, src
+                    WHERE student_id <> $1
+                 ORDER BY vec <=> src.vec LIMIT 15""",
+                sid,
+            )
+            
+            valid_sims = [
+                (sid, row["student_id"], row["sim"])
+                for row in sims
+                if row["sim"] >= S.similarity_threshold
+            ]
+            insert_rows.extend(valid_sims)
+            similarity_count += len(valid_sims)
+            
+            if (i + 1) % 50 == 0:
+                logger.debug("Similarity computation progress", extra={
+                    "processed": i + 1,
+                    "total": len(keys),
+                    "similarities_found": similarity_count
+                })
+                
+        except Exception as e:
+            logger.error("Failed to compute similarities for student", exc_info=True, extra={"student_id": sid})
+            continue
+    
+    logger.info("Similarity computation completed", extra={
+        "total_similarities": similarity_count,
+        "similarity_threshold": S.similarity_threshold
+    })
+    
+    # Insert similarities
+    logger.info("Inserting student similarities")
+    try:
+        await conn.executemany(
+            "INSERT INTO student_similarity VALUES($1,$2,$3)", insert_rows
+        )
+        logger.info("Student similarities inserted successfully", extra={"similarity_count": len(insert_rows)})
+    except Exception as e:
+        logger.error("Failed to insert similarities", exc_info=True)
+        raise
+    
+    await conn.close()
+    logger.info("Database connection closed")
+
+    # Publish metrics
+    logger.info("Publishing graph delta metrics")
+    try:
+        producer = aiokafka.AIOKafkaProducer(bootstrap_servers=S.kafka_bootstrap)
+        await producer.start()
+        
+        metric_payload = {
+            "edges": len(insert_rows), 
+            "timestamp": time.time(), 
+            "run_id": uuid.uuid4().hex
+        }
+        
+        await producer.send_and_wait(
+            "graph_delta",
+            json.dumps(metric_payload).encode(),
+        )
+        await producer.stop()
+        
+        logger.info("Graph delta metrics published successfully", extra=metric_payload)
+    except Exception as e:
+        logger.error("Failed to publish graph delta metrics", exc_info=True)
+    
+    duration = time.perf_counter() - t0
+    logger.info("Graph refresh process completed", extra={
+        "duration_sec": round(duration, 2),
+        "edges": len(insert_rows),
+        "students_processed": len(keys),
+        "similarities_found": similarity_count
+    })
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    logger.info("Starting graph refresher service")
+    try:
+        asyncio.run(main())
+        logger.info("Graph refresher service completed successfully")
+    except KeyboardInterrupt:
+        logger.info("Graph refresher interrupted by user")
+    except Exception as e:
+        logger.error("Graph refresher failed", exc_info=True)
+        raise 
