@@ -1,0 +1,4 @@
+student_id,grade_level,age,homeroom_teacher,prior_year_reading_score,lunch_period
+S001,4,9,Ms. Patel,3.4,1
+S002,4,10,Mr. Diaz,2.9,2
+S003,4,9,Ms. Patel,,1 

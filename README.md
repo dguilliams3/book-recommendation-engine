@@ -56,6 +56,12 @@ flowchart LR
         E2[Image_Worker]:::stub
     end
 
+    subgraph Offline
+        W1[Book Enrichment] --> Postgres
+        W2[Graph Refresher] --> Postgres
+        W2 --> Kafka((graph_delta))
+    end
+
     Postgres[(Postgres)]
     FAISS[(FAISS index)]
     ZK[(ZooKeeper)]
@@ -87,6 +93,7 @@ C:\Users\Dan Guilliams\OneDrive\Code Projects\book_recommendation_engine
     │      __init__.py
     │      settings.py
     │      models.py
+    │      logging.py
     ├─ingestion_service
     │      __init__.py
     │      main.py
@@ -95,12 +102,31 @@ C:\Users\Dan Guilliams\OneDrive\Code Projects\book_recommendation_engine
     │      __init__.py
     │      main.py
     │      mcp_book_server.py
+    │      db_models.py
     │      Dockerfile
+    │      └─tools
+    │             __init__.py
+    │             fetch_google_books_meta.py
+    │             fetch_open_library_meta.py
+    │             readability_formula_estimator.py
+    │             compute_student_reading_level.py
     ├─streamlit_ui
     │      __init__.py
     │      app.py
     │      Dockerfile
     ├─metrics_consumer
+    │      __init__.py
+    │      main.py
+    │      Dockerfile
+    ├─log_consumer
+    │      __init__.py
+    │      main.py
+    │      Dockerfile
+    ├─graph_refresher
+    │      __init__.py
+    │      main.py
+    │      Dockerfile
+    ├─book_enrichment_worker
     │      __init__.py
     │      main.py
     │      Dockerfile
@@ -119,70 +145,57 @@ C:\Users\Dan Guilliams\OneDrive\Code Projects\book_recommendation_engine
 
 ---
 
-## 4  Exact PowerShell commands to scaffold
+## 4  Quick Start
 
-```powershell
-# 0. set root once
-$root = "C:\Users\Dan Guilliams\OneDrive\Code Projects\book_recommendation_engine"
+The system now includes:
+- **Full PostgreSQL schema** (auto-executed on container boot)
+- **Realistic sample data** (3 books, 3 students, 5 checkouts)
+- **Cron-scheduled workers** (enrichment at 01:00, graph refresh at 02:00)
 
-# 1. directories
-mkdir -Force $root, "$root\src", `
-    "$root\src\common", `
-    "$root\src\ingestion_service", `
-    "$root\src\recommendation_api", `
-    "$root\src\streamlit_ui", `
-    "$root\src\metrics_consumer", `
-    "$root\src\stubs", `
-    "$root\src\stubs\tts_worker", `
-    "$root\src\stubs\image_worker" | Out-Null
+```bash
+# one-liner to bring up stack, load sample data, and schedule workers
+docker compose up --build
+```
 
-# 2. top‑level files
-ni "$root\.env.template" -ItemType File
-ni "$root\docker-compose.yml" -ItemType File
-ni "$root\README.md" -ItemType File
+Workers use **supercronic** so the enrichment runs at **01:00** and the
+graph refresh at **02:00** every night inside their containers.
 
-# 3. common
-ni "$root\src\common\__init__.py" -ItemType File
-ni "$root\src\common\settings.py" -ItemType File
-ni "$root\src\common\models.py" -ItemType File
+The UI will be available at `http://localhost:8501` with real recommendations
+from the sample data.
 
-# 4. ingestion_service
-ni "$root\src\ingestion_service\__init__.py" -ItemType File
-ni "$root\src\ingestion_service\main.py" -ItemType File
-ni "$root\src\ingestion_service\Dockerfile" -ItemType File
+---
 
-# 5. recommendation_api
-ni "$root\src\recommendation_api\__init__.py" -ItemType File
-ni "$root\src\recommendation_api\main.py" -ItemType File
-ni "$root\src\recommendation_api\mcp_book_server.py" -ItemType File
-ni "$root\src\recommendation_api\Dockerfile" -ItemType File
+## 5  MCP Tools Available
 
-# 6. streamlit_ui
-ni "$root\src\streamlit_ui\__init__.py" -ItemType File
-ni "$root\src\streamlit_ui\app.py" -ItemType File
-ni "$root\src\streamlit_ui\Dockerfile" -ItemType File
+The FastMCP registry (`mcp_book_server.py`) exposes these tools:
 
-# 7. metrics_consumer
-ni "$root\src\metrics_consumer\__init__.py" -ItemType File
-ni "$root\src\metrics_consumer\main.py" -ItemType File
-ni "$root\src\metrics_consumer\Dockerfile" -ItemType File
+| Tool | Function | Rate Limit |
+|------|----------|------------|
+| `search_catalog` | Vector keyword search | None |
+| `enrich_book_metadata` | Google Books → Open Library → readability | 2 rpm GB, 4 rpm OL |
+| `get_student_reading_level` | Compute reading level from history | None |
+| `find_similar_students` | Query student similarity graph | None |
+| `get_book_recommendations_for_group` | Group-based recommendations | None |
 
-# 8. stubs
-# tts_worker
-ni "$root\src\stubs\tts_worker\__init__.py" -ItemType File
-ni "$root\src\stubs\tts_worker\main.py" -ItemType File
-ni "$root\src\stubs\tts_worker\Dockerfile" -ItemType File
-ni "$root\src\stubs\tts_worker\README.md" -ItemType File
-# image_worker
-ni "$root\src\stubs\image_worker\__init__.py" -ItemType File
-ni "$root\src\stubs\image_worker\main.py" -ItemType File
-ni "$root\src\stubs\image_worker\Dockerfile" -ItemType File
-ni "$root\src\stubs\image_worker\README.md" -ItemType File
+---
+
+## 6  🚀 New nightly workers
+
+| Time (UTC) | Container | Function | Worst‑case CPU |
+|------------|-----------|----------|---------------|
+| 01:00      | book_enrichment_worker | fill page_count, publication_year, difficulty_band | <15 s |
+| 02:00      | graph_refresher        | rebuild student similarity & clusters            | <30 s |
+
+Add to `.env`:
+
+```
+SIMILARITY_THRESHOLD=0.75
+HALF_LIFE_DAYS=45
 ```
 
 ---
 
-## 5  One‑liner setup & run commands
+## 7  One‑liner setup & run commands
 
 ```bash
 # 1. bootstrap poetry & deps

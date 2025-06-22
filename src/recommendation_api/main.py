@@ -7,10 +7,21 @@ from common import SettingsInstance as S
 from langgraph.graph import Graph
 from langchain_openai import OpenAI
 from langchain.prompts import ChatPromptTemplate
+from sqlalchemy.ext.asyncio import create_async_engine
+from . import db_models
 
 app = FastAPI(title="Book‑Recommendation‑API")
 logger = logging.getLogger("recommendation_api")
 logging.basicConfig(level=logging.INFO)
+
+# --- auto-DDL setup ----------------------------------------------------
+engine = create_async_engine(S.db_url, echo=False)
+
+async def _ensure_tables():
+    async with engine.begin() as conn:
+        await conn.run_sync(db_models.Base.metadata.create_all)
+
+asyncio.get_event_loop().run_until_complete(_ensure_tables())
 
 # --- metrics -----------------------------------------------------------
 producer = AIOKafkaProducer(bootstrap_servers=S.kafka_bootstrap)

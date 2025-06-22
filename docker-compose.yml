@@ -8,6 +8,7 @@ services:
       POSTGRES_USER: books
       POSTGRES_PASSWORD: books
     volumes:
+      - ./sql:/docker-entrypoint-initdb.d
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "books"]
@@ -74,6 +75,24 @@ services:
     volumes:
       - ./logs:/app/logs
     depends_on: [kafka]
+
+  graph_refresher:
+    build: ./src/graph_refresher
+    volumes:
+      - ./data:/data
+    environment:
+      - OPENAI_API_KEY
+      - SIMILARITY_THRESHOLD=${SIMILARITY_THRESHOLD}
+      - HALF_LIFE_DAYS=${HALF_LIFE_DAYS}
+    depends_on: [postgres, kafka]
+
+  book_enrichment_worker:
+    build: ./src/book_enrichment_worker
+    volumes:
+      - ./data:/data
+    environment:
+      - OPENAI_API_KEY
+    depends_on: [postgres]
 
   # ---- optional stubs ---------------------------------
   tts_worker:

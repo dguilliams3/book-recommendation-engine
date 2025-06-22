@@ -1,5 +1,5 @@
 from pathlib import Path
-from pydantic import BaseSettings, Field, AnyHttpUrl
+from pydantic import BaseSettings, Field, AnyUrl
 
 class Settings(BaseSettings):
     # --- core -----------------------------------------------------------
@@ -8,8 +8,14 @@ class Settings(BaseSettings):
     model_name: str = Field("gpt-4o", env="OPENAI_MODEL")
     openai_api_key: str = Field(..., env="OPENAI_API_KEY")
     vector_store_type: str = Field("faiss", env="VECTOR_STORE_TYPE")   # faiss|chroma|pinecone
-    db_url: AnyHttpUrl = Field("postgresql+asyncpg://books:books@postgres:5432/books", env="DB_URL")
+    db_url: AnyUrl = Field("postgresql+asyncpg://books:books@postgres:5432/books", env="DB_URL")
     kafka_bootstrap: str = Field("kafka:9092", env="KAFKA_BROKERS")
+    google_books_api_key: str | None = Field(None, env="GOOGLE_BOOKS_KEY")
+    openai_request_timeout: int = Field(20, env="OPENAI_TIMEOUT")
+
+    # batch parameters
+    similarity_threshold: float = Field(0.75, env="SIMILARITY_THRESHOLD")
+    half_life_days: int = Field(45, env="HALF_LIFE_DAYS")
 
     # service ports (overridable) ---------------------------------------
     ingestion_port: int = 8001
@@ -25,4 +31,6 @@ class Settings(BaseSettings):
         env_file = ".env"        # populated from .env.template
 
 # singleton
-SettingsInstance = Settings() 
+SettingsInstance = Settings()
+# pep-8 alias
+settings = SettingsInstance 
