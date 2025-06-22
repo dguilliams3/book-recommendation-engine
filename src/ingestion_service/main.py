@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Iterable
 
 from aiokafka import AIOKafkaProducer
-from langchain.vectorstores import FAISS
+from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy import text

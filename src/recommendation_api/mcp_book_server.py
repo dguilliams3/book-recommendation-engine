@@ -16,11 +16,11 @@ from pathlib import Path
 from typing import List
 
 from fastmcp import FastMCP
-from aio_limiter import AsyncLimiter
+from asyncio_throttle import Throttler
 
 from common import SettingsInstance as S
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
 from recommendation_api.tools import (
     fetch_google_books_meta,
     fetch_open_library_meta,
@@ -54,8 +54,8 @@ async def _pg() -> asyncpg.pool.Pool:
     return _pg_pool
 
 # rate-limiters for external APIs
-gb_limiter = AsyncLimiter(2, time_period=60)   # 2 rpm
-ol_limiter = AsyncLimiter(4, time_period=60)   # 4 rpm
+gb_throttler = Throttler(rate_limit=2, period=60)   # 2 rpm
+ol_throttler = Throttler(rate_limit=4, period=60)   # 4 rpm
 
 # --------------------------------------------------------------------- #
 @mcp.tool(annotations={"title": "Search Catalog by Keyword", "readOnlyHint": True})
@@ -72,11 +72,11 @@ async def enrich_book_metadata(isbn: str):
     Open Library (fallback). If still missing, estimate difficulty_band
     via readability on the stored description.
     """
-    async with gb_limiter:
+    async with gb_throttler:
         meta = await fetch_google_books_meta(isbn)
     # any missing? -> fallback
     if not meta.get("page_count") or not meta.get("publication_year"):
-        async with ol_limiter:
+        async with ol_throttler:
             meta |= await fetch_open_library_meta(isbn)
 
     # readability fallback only if difficulty still None

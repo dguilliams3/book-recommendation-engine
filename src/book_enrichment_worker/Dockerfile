@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y curl && \
     chmod +x /usr/local/bin/supercronic && \
     pip install --no-cache-dir poetry && \
     poetry config virtualenvs.create false && \
-    poetry init -n && \
+    poetry init -n --python "^3.11" && \
     poetry add aiohttp asyncpg textstat
 COPY --chmod=0644 <<'CRON' /app/enrich_cron
 0 1 * * * python -m book_enrichment_worker.main
