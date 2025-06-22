@@ -1,0 +1,96 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: books
+      POSTGRES_USER: books
+      POSTGRES_PASSWORD: books
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "books"]
+      interval: 5s
+      retries: 5
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    depends_on: [zookeeper]
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  ingestion_service:
+    build: ./src/ingestion_service
+    volumes:
+      - ./data:/data
+    environment:
+      - OPENAI_API_KEY
+      - OPENAI_MODEL=${OPENAI_MODEL}
+      - VECTOR_STORE_TYPE=${VECTOR_STORE_TYPE}
+      - DB_URL=${DB_URL}
+      - KAFKA_BROKERS=${KAFKA_BROKERS}
+    depends_on: [postgres, kafka]
+
+  recommendation_api:
+    build: ./src/recommendation_api
+    volumes:
+      - ./data:/data
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY
+      - OPENAI_MODEL=${OPENAI_MODEL}
+      - VECTOR_STORE_TYPE=${VECTOR_STORE_TYPE}
+      - DB_URL=${DB_URL}
+      - KAFKA_BROKERS=${KAFKA_BROKERS}
+    depends_on: [ingestion_service]
+
+  streamlit_ui:
+    build: ./src/streamlit_ui
+    ports:
+      - "8501:8501"
+    depends_on: [recommendation_api]
+
+  metrics_consumer:
+    build: ./src/metrics_consumer
+    environment:
+      - KAFKA_BROKERS=${KAFKA_BROKERS}
+    depends_on: [kafka]
+
+  log_consumer:
+    build: ./src/log_consumer
+    environment:
+      - KAFKA_BROKERS=${KAFKA_BROKERS}
+    volumes:
+      - ./logs:/app/logs
+    depends_on: [kafka]
+
+  # ---- optional stubs ---------------------------------
+  tts_worker:
+    build: ./src/stubs/tts_worker
+    environment:
+      - ENABLE_TTS
+    command: ["sleep","3600"]
+    deploy:
+      replicas: ${ENABLE_TTS}
+
+  image_worker:
+    build: ./src/stubs/image_worker
+    environment:
+      - ENABLE_IMAGE
+    command: ["sleep","3600"]
+    deploy:
+      replicas: ${ENABLE_IMAGE}
+
+volumes:
+  pgdata: 
