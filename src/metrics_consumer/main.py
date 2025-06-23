@@ -1,7 +1,7 @@
 import asyncio, json
 from aiokafka import AIOKafkaConsumer
 from common import SettingsInstance as S
-from common.logging import get_logger
+from common.structured_logging import get_logger
 
 logger = get_logger(__name__)
 

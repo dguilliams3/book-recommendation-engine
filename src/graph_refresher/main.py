@@ -6,19 +6,23 @@ Nightly job (<60 s CPU) that:
 4. Writes top‑K neighbours ≥ similarity_threshold to student_similarity.
 5. Publishes edge‑count delta metric to Kafka topic `graph_delta`.
 """
-import asyncio, json, math, time, uuid
+import asyncio, json, math, time, uuid, sys
 from datetime import date, timedelta
 from collections import defaultdict
+from pathlib import Path
+
+# Add src to Python path so we can find the common module when run directly
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import aiokafka, asyncpg
 from langchain_openai import OpenAIEmbeddings
 from common import SettingsInstance as S
-from common.logging import get_logger
+from common.structured_logging import get_logger
 
 logger = get_logger(__name__)
 
 EMB = OpenAIEmbeddings(
-    model="text-embedding-3-small",
+    model=S.embedding_model,
     api_key=S.openai_api_key,
     request_timeout=15,
 )
@@ -75,7 +79,10 @@ async def main():
         d_band = r["difficulty_band"]
         days = (today - r["checkout_date"]).days
         w = half_life_weight(days)
-        tokens[r["student_id"]].append((d_band, w))
+        # Ensure student key exists even if difficulty_band is None
+        _list = tokens[r["student_id"]]  # touch to create default list
+        if d_band is not None:
+            _list.append((d_band, w))
         student_count = max(student_count, len(tokens))
     
     logger.info("Processed events", extra={
@@ -107,27 +114,33 @@ async def main():
         logger.error("Failed to generate embeddings", exc_info=True)
         raise
 
-    # Setup vector extension and table
+    # Setup vector extension and table with correct dimension
     logger.info("Setting up vector extension and table")
     try:
         await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        dim = len(vectors[0]) if vectors else 0
+        # Drop table if exists with wrong dimension
+        await conn.execute("DROP TABLE IF EXISTS student_embeddings")
         await conn.execute(
-            """CREATE TABLE IF NOT EXISTS student_embeddings(
-                   student_id TEXT PRIMARY KEY,
-                   vec VECTOR(1536))"""
+            f"CREATE TABLE student_embeddings( student_id TEXT PRIMARY KEY, vec VECTOR({dim}) )"
         )
-        logger.info("Vector extension and table setup completed")
+        logger.info("Vector extension and table setup completed", extra={"dimension": dim})
     except Exception as e:
         logger.error("Failed to setup vector extension/table", exc_info=True)
         raise
 
-    # Insert embeddings
+    # Insert embeddings (convert list -> pgvector literal)
     logger.info("Inserting student embeddings")
     try:
+        rows_to_insert = []
+        for sid, vec in zip(keys, vectors):
+            pg_vec = "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
+            rows_to_insert.append((sid, pg_vec))
+
         await conn.executemany(
             "INSERT INTO student_embeddings VALUES($1,$2)"
             "ON CONFLICT(student_id) DO UPDATE SET vec = EXCLUDED.vec",
-            list(zip(keys, vectors)),
+            rows_to_insert,
         )
         logger.info("Student embeddings inserted successfully", extra={"embedding_count": len(keys)})
     except Exception as e:
@@ -164,10 +177,10 @@ async def main():
         try:
             sims = await conn.fetch(
                 """WITH src AS (SELECT vec FROM student_embeddings WHERE student_id=$1)
-                   SELECT student_id, 1-(vec <=> src.vec) AS sim
+                   SELECT student_id, 1-(student_embeddings.vec <=> src.vec) AS sim
                      FROM student_embeddings, src
                     WHERE student_id <> $1
-                 ORDER BY vec <=> src.vec LIMIT 15""",
+                 ORDER BY student_embeddings.vec <=> src.vec LIMIT 15""",
                 sid,
             )
             

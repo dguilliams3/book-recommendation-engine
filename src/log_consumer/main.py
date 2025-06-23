@@ -1,7 +1,7 @@
 import asyncio, os
 from aiokafka import AIOKafkaConsumer
 from pathlib import Path
-from common.logging import get_logger
+from common.structured_logging import get_logger
 
 logger = get_logger(__name__)
 

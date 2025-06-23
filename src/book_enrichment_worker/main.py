@@ -2,10 +2,15 @@
 Book‑level enrichment cascade.
 Per manifest: Google Books (2 rpm) ➜ Open Library (4 rpm) ➜ readability fallback.
 """
-import asyncio, aiohttp, asyncpg, time
+import asyncio, aiohttp, asyncpg, time, sys
+from pathlib import Path
+
+# Add src to Python path so we can find the common module when run directly
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from common import SettingsInstance as S
-from common.logging import get_logger
-from tools import readability_formula_estimator
+from common.structured_logging import get_logger
+from recommendation_api.tools import readability_formula_estimator
 
 logger = get_logger(__name__)
 

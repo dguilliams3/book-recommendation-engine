@@ -1,0 +1,2 @@
+[console_scripts]
+bre = src.cli:app

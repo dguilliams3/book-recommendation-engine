@@ -19,7 +19,7 @@ from fastmcp import FastMCP
 from asyncio_throttle import Throttler
 
 from common import SettingsInstance as S
-from common.logging import get_logger
+from common.structured_logging import get_logger
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from recommendation_api.tools import (
@@ -35,7 +35,7 @@ mcp = FastMCP("book")
 logger = get_logger(__name__)
 
 # vector store
-emb = OpenAIEmbeddings(api_key=S.openai_api_key, model=S.model_name)
+emb = OpenAIEmbeddings(api_key=S.openai_api_key, model=S.embedding_model)
 vec_store = None
 
 def _store():
@@ -43,7 +43,7 @@ def _store():
     if vec_store is None:
         logger.info("Loading FAISS vector store")
         try:
-            vec_store = FAISS.load_local(Path(S.data_dir) / "vector_store")
+            vec_store = FAISS.load_local(Path(S.data_dir) / "vector_store", emb, allow_dangerous_deserialization=True)
             logger.info("FAISS vector store loaded successfully")
         except Exception as e:
             logger.error("Failed to load FAISS vector store", exc_info=True)
@@ -110,47 +110,47 @@ async def enrich_book_metadata(isbn: str):
         logger.debug("Attempting Google Books enrichment", extra={"isbn": isbn})
         async with gb_throttler:
             meta = await fetch_google_books_meta(isbn)
-        
-        logger.debug("Google Books enrichment result", extra={
-            "isbn": isbn,
-            "has_page_count": bool(meta.get("page_count")),
-            "has_publication_year": bool(meta.get("publication_year"))
-        })
-        
-        # Fallback to Open Library if needed
-        if not meta.get("page_count") or not meta.get("publication_year"):
-            logger.debug("Attempting Open Library enrichment", extra={"isbn": isbn})
-            async with ol_throttler:
-                ol_meta = await fetch_open_library_meta(isbn)
-                meta |= ol_meta
             
-            logger.debug("Open Library enrichment result", extra={
+            logger.debug("Google Books enrichment result", extra={
                 "isbn": isbn,
                 "has_page_count": bool(meta.get("page_count")),
                 "has_publication_year": bool(meta.get("publication_year"))
             })
-
-        # Readability fallback if still missing
-        if not meta.get("page_count") or not meta.get("publication_year"):
-            logger.debug("Using readability formula fallback", extra={"isbn": isbn})
-            pool = await _pg()
-            async with pool.acquire() as con:
-                desc = await con.fetchval("SELECT description FROM catalog WHERE isbn=$1", isbn)
-            readability_meta = readability_formula_estimator(desc or "")
-            meta |= readability_meta
             
-            logger.debug("Readability fallback result", extra={
+            # Fallback to Open Library if needed
+            if not meta.get("page_count") or not meta.get("publication_year"):
+                logger.debug("Attempting Open Library enrichment", extra={"isbn": isbn})
+                async with ol_throttler:
+                    ol_meta = await fetch_open_library_meta(isbn)
+                    meta |= ol_meta
+                
+                logger.debug("Open Library enrichment result", extra={
+                    "isbn": isbn,
+                    "has_page_count": bool(meta.get("page_count")),
+                    "has_publication_year": bool(meta.get("publication_year"))
+                })
+
+            # Readability fallback if still missing
+            if not meta.get("page_count") or not meta.get("publication_year"):
+                logger.debug("Using readability formula fallback", extra={"isbn": isbn})
+                pool = await _pg()
+                async with pool.acquire() as con:
+                    desc = await con.fetchval("SELECT description FROM catalog WHERE isbn=$1", isbn)
+                    readability_meta = readability_formula_estimator(desc or "")
+                    meta |= readability_meta
+                    
+                    logger.debug("Readability fallback result", extra={
+                        "isbn": isbn,
+                        "has_difficulty_band": bool(readability_meta.get("difficulty_band"))
+                    })
+
+            logger.info("Book metadata enrichment completed", extra={
                 "isbn": isbn,
-                "has_difficulty_band": bool(readability_meta.get("difficulty_band"))
+                "page_count": meta.get("page_count"),
+                "publication_year": meta.get("publication_year"),
+                "difficulty_band": meta.get("difficulty_band")
             })
 
-        logger.info("Book metadata enrichment completed", extra={
-            "isbn": isbn,
-            "page_count": meta.get("page_count"),
-            "publication_year": meta.get("publication_year"),
-            "difficulty_band": meta.get("difficulty_band")
-        })
-        
         return meta
         
     except Exception as e:
@@ -174,22 +174,22 @@ async def get_student_reading_level(student_id: str):
                     WHERE student_id=$1 AND return_date IS NOT NULL""",
                 student_id,
             )
-        
-        logger.debug("Fetched checkout history", extra={
-            "student_id": student_id,
-            "checkout_count": len(rows)
-        })
-        
-        result = compute_student_reading_level([dict(r) for r in rows])
-        
-        logger.info("Student reading level computed", extra={
-            "student_id": student_id,
-            "avg_reading_level": result.get("avg_reading_level"),
-            "confidence": result.get("confidence"),
-            "checkout_count": len(rows)
-        })
-        
-        return result
+            
+            logger.debug("Fetched checkout history", extra={
+                "student_id": student_id,
+                "checkout_count": len(rows)
+            })
+            
+            result = compute_student_reading_level([dict(r) for r in rows])
+            
+            logger.info("Student reading level computed", extra={
+                "student_id": student_id,
+                "avg_reading_level": result.get("avg_reading_level"),
+                "confidence": result.get("confidence"),
+                "checkout_count": len(rows)
+            })
+            
+            return result
         
     except Exception as e:
         logger.error("Student reading level computation failed", exc_info=True, extra={"student_id": student_id})
@@ -212,17 +212,17 @@ async def find_similar_students(student_id: str, limit: int = 5):
                 student_id,
                 limit,
             )
-        
-        results = [{"student_id": r["b"], "similarity": float(r["sim"])} for r in rows]
-        
-        logger.info("Similar students search completed", extra={
-            "student_id": student_id,
-            "limit": limit,
-            "results_count": len(results),
-            "top_similarity": results[0]["similarity"] if results else None
-        })
-        
-        return results
+            
+            results = [{"student_id": r["b"], "similarity": float(r["sim"])} for r in rows]
+            
+            logger.info("Similar students search completed", extra={
+                "student_id": student_id,
+                "limit": limit,
+                "results_count": len(results),
+                "top_similarity": results[0]["similarity"] if results else None
+            })
+            
+            return results
         
     except Exception as e:
         logger.error("Similar students search failed", exc_info=True, extra={"student_id": student_id, "limit": limit})
@@ -262,22 +262,22 @@ async def get_book_recommendations_for_group(student_ids: List[str], n: int = 3)
                     WHERE average_student_rating IS NOT NULL
                  ORDER BY average_student_rating DESC LIMIT 50"""
             )
-        
-        recs = [
-            dict(r)
-            for r in rows
-            if r["book_id"] not in seen_ids
-        ][: n]
-        
-        logger.info("Group book recommendations completed", extra={
-            "student_ids": student_ids,
-            "n": n,
-            "recommendations_count": len(recs),
-            "candidate_pool_size": len(rows),
-            "seen_books_excluded": len(seen_ids)
-        })
-        
-        return recs
+            
+            recs = [
+                dict(r)
+                for r in rows
+                if r["book_id"] not in seen_ids
+            ][: n]
+            
+            logger.info("Group book recommendations completed", extra={
+                "student_ids": student_ids,
+                "n": n,
+                "recommendations_count": len(recs),
+                "candidate_pool_size": len(rows),
+                "seen_books_excluded": len(seen_ids)
+            })
+            
+            return recs
         
     except Exception as e:
         logger.error("Group book recommendations failed", exc_info=True, extra={
@@ -290,7 +290,7 @@ async def get_book_recommendations_for_group(student_ids: List[str], n: int = 3)
 if __name__ == "__main__":           # pragma: no cover
     logger.info("Starting MCP book server")
     try:
-        mcp.run(transport="stdio")
+        mcp.run(transport="stdio") 
         logger.info("MCP book server completed successfully")
     except Exception as e:
         logger.error("MCP book server failed", exc_info=True)

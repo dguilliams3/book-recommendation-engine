@@ -1,0 +1,9 @@
+book_enrichment_worker
+common
+graph_refresher
+ingestion_service
+log_consumer
+metrics_consumer
+recommendation_api
+streamlit_ui
+stubs

@@ -12,4 +12,4 @@ class RecommendationHistory(Base):
     recommendation_date = Column(Date, nullable=False)
     query = Column(Text)
     confidence_score = Column(Float)
-    metadata = Column(JSON) 
+    book_metadata = Column(JSON) 

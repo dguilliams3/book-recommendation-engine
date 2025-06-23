@@ -1,0 +1,12 @@
+langchain
+langchain-community
+langchain-openai
+openai>=1.10.0
+aiokafka>=0.9.0
+sqlalchemy[asyncio]
+psycopg2-binary
+asyncpg>=0.29.0
+pandas
+pydantic>=2.5.0
+faiss-cpu
+pydantic-settings>=2.1.0

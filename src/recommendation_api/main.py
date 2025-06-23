@@ -2,9 +2,9 @@ import asyncio, json, os, uuid, time
 from fastapi import FastAPI, HTTPException
 from starlette.responses import JSONResponse
 from aiokafka import AIOKafkaProducer
-from fastmcp import StdioServerParameters, stdio_client, ClientSession
-from common import SettingsInstance as S
-from common.logging import get_logger
+from mcp import StdioServerParameters, stdio_client, ClientSession
+from ..common import SettingsInstance as S
+from ..common.structured_logging import get_logger
 from langgraph.graph import Graph
 from langchain_openai import OpenAI
 from langchain.prompts import ChatPromptTemplate
@@ -19,7 +19,15 @@ logger = get_logger(__name__)
 
 # --- auto-DDL setup ----------------------------------------------------
 logger.info("Initializing database connection")
-engine = create_async_engine(S.db_url, echo=False)
+# Convert postgresql:// to postgresql+asyncpg:// for async operations
+db_url_str = str(S.db_url)
+if db_url_str.startswith("postgresql://"):
+    async_db_url = db_url_str.replace("postgresql://", "postgresql+asyncpg://")
+elif db_url_str.startswith("postgresql+asyncpg://"):
+    async_db_url = db_url_str
+else:
+    async_db_url = db_url_str
+engine = create_async_engine(async_db_url, echo=False)
 
 async def _ensure_tables():
     logger.info("Ensuring database tables exist")
@@ -31,14 +39,10 @@ async def _ensure_tables():
         logger.error("Failed to create database tables", exc_info=True)
         raise
 
-asyncio.get_event_loop().run_until_complete(_ensure_tables())
-
 # --- metrics -----------------------------------------------------------
 logger.info("Initializing Kafka producer for metrics")
 producer = AIOKafkaProducer(bootstrap_servers=S.kafka_bootstrap)
-asyncio.get_event_loop().run_until_complete(producer.start())
 TOPIC = "api_metrics"
-logger.info("Kafka producer started successfully")
 
 async def push_metric(event: str, extra: dict | None = None):
     try:
@@ -156,6 +160,21 @@ async def recommend(student_id: str, n: int = 3, query: str = "adventure"):
             "duration_sec": round(duration, 3),
             "error": str(e)
         })
+        raise
+
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Starting up recommendation API")
+    try:
+        # Start Kafka producer
+        await producer.start()
+        logger.info("Kafka producer started successfully")
+        
+        # Ensure database tables exist
+        await _ensure_tables()
+        
+    except Exception as e:
+        logger.error("Failed to start up recommendation API", exc_info=True)
         raise
 
 @app.on_event("shutdown")

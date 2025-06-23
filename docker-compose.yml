@@ -1,6 +1,9 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: ankane/pgvector:latest
+    platform: linux/amd64
+    ports:
+      - "5432:5432"
     environment:
       POSTGRES_DB: books
       POSTGRES_USER: books
@@ -9,29 +12,58 @@ services:
       - ./sql:/docker-entrypoint-initdb.d
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "books"]
+      test: ["CMD-SHELL", "pg_isready -U books"]
       interval: 5s
+      timeout: 5s
       retries: 5
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.1
+    platform: linux/amd64
+    hostname: zookeeper
+    container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: echo "ruok" | nc -w 2 localhost 2181 | grep imok
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   kafka:
     image: confluentinc/cp-kafka:7.6.1
+    platform: linux/amd64
+    hostname: kafka
+    container_name: kafka
+    ports:
+      - "9092:9092"
+      - "29092:29092"
     depends_on: [zookeeper]
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD", "bash", "-ec", "kafka-topics.sh --bootstrap-server kafka:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
 
   ingestion_service:
     build:
       context: .
       dockerfile: src/ingestion_service/Dockerfile
+    platform: linux/amd64
+    container_name: ingestion_service
+    env_file:
+      - .env
     volumes:
       - ./data:/data
     environment:
@@ -46,6 +78,10 @@ services:
     build:
       context: .
       dockerfile: src/recommendation_api/Dockerfile
+    platform: linux/amd64
+    container_name: recommendation_api
+    env_file:
+      - .env
     volumes:
       - ./data:/data
     ports:
@@ -56,12 +92,17 @@ services:
       - VECTOR_STORE_TYPE=${VECTOR_STORE_TYPE}
       - DB_URL=${DB_URL}
       - KAFKA_BROKERS=${KAFKA_BROKERS}
+      - PYTHONPATH=/app:/app/common
     depends_on: [ingestion_service]
 
   streamlit_ui:
     build:
       context: .
       dockerfile: src/streamlit_ui/Dockerfile
+    platform: linux/amd64
+    container_name: streamlit_ui
+    env_file:
+      - .env
     ports:
       - "8501:8501"
     depends_on: [recommendation_api]
@@ -70,24 +111,40 @@ services:
     build:
       context: .
       dockerfile: src/metrics_consumer/Dockerfile
+    platform: linux/amd64
+    container_name: metrics_consumer
+    env_file:
+      - .env
     environment:
       - KAFKA_BROKERS=${KAFKA_BROKERS}
-    depends_on: [kafka]
+    depends_on:
+      kafka:
+        condition: service_healthy
 
   log_consumer:
     build:
       context: .
       dockerfile: src/log_consumer/Dockerfile
+    platform: linux/amd64
+    container_name: log_consumer
+    env_file:
+      - .env
     environment:
       - KAFKA_BROKERS=${KAFKA_BROKERS}
     volumes:
       - ./logs:/app/logs
-    depends_on: [kafka]
+    depends_on:
+      kafka:
+        condition: service_healthy
 
   graph_refresher:
     build:
       context: .
       dockerfile: src/graph_refresher/Dockerfile
+    platform: linux/amd64
+    container_name: graph_refresher
+    env_file:
+      - .env
     volumes:
       - ./data:/data
     environment:
@@ -100,6 +157,10 @@ services:
     build:
       context: .
       dockerfile: src/book_enrichment_worker/Dockerfile
+    platform: linux/amd64
+    container_name: book_enrichment_worker
+    env_file:
+      - .env
     volumes:
       - ./data:/data
     environment:
@@ -111,6 +172,10 @@ services:
     build:
       context: .
       dockerfile: src/stubs/tts_worker/Dockerfile
+    platform: linux/amd64
+    container_name: tts_worker
+    env_file:
+      - .env
     environment:
       - ENABLE_TTS
     command: ["sleep","3600"]
@@ -121,6 +186,10 @@ services:
     build:
       context: .
       dockerfile: src/stubs/image_worker/Dockerfile
+    platform: linux/amd64
+    container_name: image_worker
+    env_file:
+      - .env
     environment:
       - ENABLE_IMAGE
     command: ["sleep","3600"]
