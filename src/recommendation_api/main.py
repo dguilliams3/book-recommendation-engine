@@ -3,8 +3,8 @@ from fastapi import FastAPI, HTTPException
 from starlette.responses import JSONResponse
 from aiokafka import AIOKafkaProducer
 from mcp import StdioServerParameters, stdio_client, ClientSession
-from ..common import SettingsInstance as S
-from ..common.structured_logging import get_logger
+from common import SettingsInstance as S
+from common.structured_logging import get_logger
 from langgraph.graph import Graph
 from langchain_openai import OpenAI
 from langchain.prompts import ChatPromptTemplate

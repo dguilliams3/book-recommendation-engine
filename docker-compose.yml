@@ -25,6 +25,7 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_4LW_COMMANDS_WHITELIST: "ruok,stat"
     healthcheck:
       test: echo "ruok" | nc -w 2 localhost 2181 | grep imok
       interval: 5s
@@ -51,7 +52,7 @@ services:
       KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1
     healthcheck:
-      test: ["CMD", "bash", "-ec", "kafka-topics.sh --bootstrap-server kafka:9092 --list || exit 1"]
+      test: ["CMD", "bash", "-ec", "/usr/bin/kafka-topics --bootstrap-server localhost:9092 --list || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -72,7 +73,11 @@ services:
       - VECTOR_STORE_TYPE=${VECTOR_STORE_TYPE}
       - DB_URL=${DB_URL}
       - KAFKA_BROKERS=${KAFKA_BROKERS}
-    depends_on: [postgres, kafka]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_started
 
   recommendation_api:
     build:
@@ -93,7 +98,9 @@ services:
       - DB_URL=${DB_URL}
       - KAFKA_BROKERS=${KAFKA_BROKERS}
       - PYTHONPATH=/app:/app/common
-    depends_on: [ingestion_service]
+    depends_on:
+      ingestion_service:
+        condition: service_started
 
   streamlit_ui:
     build:
@@ -166,6 +173,64 @@ services:
     environment:
       - OPENAI_API_KEY
     depends_on: [postgres]
+
+  book_vector_worker:
+    build:
+      context: .
+      dockerfile: src/incremental_workers/book_vector/Dockerfile
+    platform: linux/amd64
+    container_name: book_vector_worker
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+
+  student_profile_worker:
+    build:
+      context: .
+      dockerfile: src/incremental_workers/student_profile/Dockerfile
+    platform: linux/amd64
+    container_name: student_profile_worker
+    env_file:
+      - .env
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+
+  student_embedding_worker:
+    build:
+      context: .
+      dockerfile: src/incremental_workers/student_embedding/Dockerfile
+    platform: linux/amd64
+    container_name: student_embedding_worker
+    env_file:
+      - .env
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+
+  similarity_worker:
+    build:
+      context: .
+      dockerfile: src/incremental_workers/similarity/Dockerfile
+    platform: linux/amd64
+    container_name: similarity_worker
+    env_file:
+      - .env
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_started
 
   # ---- optional stubs ---------------------------------
   tts_worker:

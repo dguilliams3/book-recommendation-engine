@@ -5,11 +5,14 @@ Nightly job (<60 s CPU) that:
 3. Upserts pgvector table, builds ivfflat(lists=32) index.
 4. Writes top‑K neighbours ≥ similarity_threshold to student_similarity.
 5. Publishes edge‑count delta metric to Kafka topic `graph_delta`.
+
+Now also listens for book added events to trigger refresh.
 """
 import asyncio, json, math, time, uuid, sys
 from datetime import date, timedelta
 from collections import defaultdict
 from pathlib import Path
+from typing import Optional
 
 # Add src to Python path so we can find the common module when run directly
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -18,6 +21,8 @@ import aiokafka, asyncpg
 from langchain_openai import OpenAIEmbeddings
 from common import SettingsInstance as S
 from common.structured_logging import get_logger
+from common.kafka_utils import KafkaEventConsumer
+from common.events import BOOK_EVENTS_TOPIC
 
 logger = get_logger(__name__)
 
@@ -26,6 +31,40 @@ EMB = OpenAIEmbeddings(
     api_key=S.openai_api_key,
     request_timeout=15,
 )
+
+# Debouncing for event-triggered refreshes
+_refresh_task: Optional[asyncio.Task] = None
+_refresh_delay = 30  # seconds to wait after last event before refreshing
+
+async def debounced_refresh():
+    """Debounced refresh that waits for events to settle before running."""
+    global _refresh_task
+    
+    if _refresh_task and not _refresh_task.done():
+        logger.info("Cancelling previous refresh task")
+        _refresh_task.cancel()
+    
+    _refresh_task = asyncio.create_task(_delayed_refresh())
+
+async def _delayed_refresh():
+    """Wait for the delay period then run the refresh."""
+    try:
+        await asyncio.sleep(_refresh_delay)
+        logger.info("Starting event-triggered graph refresh")
+        await main()
+        logger.info("Event-triggered graph refresh completed")
+    except asyncio.CancelledError:
+        logger.info("Event-triggered refresh was cancelled")
+    except Exception as e:
+        logger.error("Event-triggered refresh failed", exc_info=True)
+
+async def handle_book_event(event_data: dict):
+    """Handle book added events by triggering a debounced refresh."""
+    try:
+        logger.info("Received book added event", extra={"event": event_data})
+        await debounced_refresh()
+    except Exception as e:
+        logger.error("Error handling book event", exc_info=True, extra={"event": event_data})
 
 def half_life_weight(days: int) -> float:
     return 0.5 ** (days / S.half_life_days)
@@ -255,7 +294,28 @@ async def main():
 if __name__ == "__main__":
     logger.info("Starting graph refresher service")
     try:
-        asyncio.run(main())
+        # Run initial refresh and event listener in parallel
+        async def run_service():
+            # Start event listener
+            consumer = KafkaEventConsumer(BOOK_EVENTS_TOPIC, "graph_refresher")
+            listener_task = asyncio.create_task(consumer.start(handle_book_event))
+            
+            # Run initial refresh
+            try:
+                await main()
+                logger.info("Initial graph refresh completed")
+            except Exception as e:
+                logger.error("Initial graph refresh failed", exc_info=True)
+            
+            # Keep the event listener running
+            logger.info("Graph refresher service running - listening for events")
+            try:
+                await listener_task
+            except KeyboardInterrupt:
+                logger.info("Graph refresher interrupted by user")
+                await consumer.stop()
+        
+        asyncio.run(run_service())
         logger.info("Graph refresher service completed successfully")
     except KeyboardInterrupt:
         logger.info("Graph refresher interrupted by user")
