@@ -1,2 +1,5 @@
 venv/
 .env
+EXAMPLES USING MCP AND LANGCHAIN REACT/
+development_scripts/
+data/
