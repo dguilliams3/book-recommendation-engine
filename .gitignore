@@ -3,3 +3,4 @@ venv/
 EXAMPLES USING MCP AND LANGCHAIN REACT/
 development_scripts/
 data/
+__pycache__/
