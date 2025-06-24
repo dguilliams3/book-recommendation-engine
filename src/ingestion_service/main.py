@@ -7,6 +7,7 @@
 import asyncio, csv, json, time, uuid, sys
 from pathlib import Path
 from typing import Iterable
+from recommendation_api.tools.readability_formula_estimator import readability_formula_estimator
 
 # Add src to Python path so we can find the common module when run directly
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -99,10 +100,15 @@ async def ingest():
                             row[field] = json.dumps([v])
                     elif v is None:
                         row[field] = json.dumps([])
-                item = models.BookCatalogItem(**row)
+                
+                # Compute FKGL reading level from description
+                reading_meta = readability_formula_estimator(row.get("description", ""))
+                reading_level_val = reading_meta.get("average_grade_level")
+
+                item = models.BookCatalogItem(**row, reading_level=reading_level_val)
                 await sess.execute(
-                    text("""INSERT INTO catalog(book_id,isbn,title,genre,keywords,description,page_count,publication_year,difficulty_band,average_student_rating)
-                        VALUES(:book_id,:isbn,:title,:genre,:keywords,:description,:page_count,:publication_year,:difficulty_band,:rating)
+                    text("""INSERT INTO catalog(book_id,isbn,title,genre,keywords,description,page_count,publication_year,difficulty_band,reading_level,average_student_rating)
+                        VALUES(:book_id,:isbn,:title,:genre,:keywords,:description,:page_count,:publication_year,:difficulty_band,:reading_level,:rating)
                         ON CONFLICT(book_id) DO UPDATE SET
                             isbn=EXCLUDED.isbn,
                             genre=EXCLUDED.genre,
@@ -111,6 +117,7 @@ async def ingest():
                             page_count=COALESCE(EXCLUDED.page_count, catalog.page_count),
                             publication_year=COALESCE(EXCLUDED.publication_year, catalog.publication_year),
                             difficulty_band=COALESCE(EXCLUDED.difficulty_band, catalog.difficulty_band),
+                            reading_level=COALESCE(EXCLUDED.reading_level, catalog.reading_level),
                             average_student_rating=EXCLUDED.average_student_rating"""),
                     {
                         "book_id": item.book_id,
@@ -122,13 +129,14 @@ async def ingest():
                         "page_count": item.page_count,
                         "publication_year": item.publication_year,
                         "difficulty_band": item.difficulty_band,
+                        "reading_level": reading_level_val,
                         "rating": item.average_student_rating,
                     },
                 )
                 
                 # Collect text and metadata for FAISS index
                 book_texts.append(f"{item.title}. {item.description or ''}")
-                book_metadatas.append({"book_id": item.book_id})
+                book_metadatas.append({"book_id": item.book_id, "reading_level": reading_level_val})
                 book_count += 1
                 
                 if book_count % 100 == 0:

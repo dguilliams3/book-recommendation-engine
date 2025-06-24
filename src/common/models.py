@@ -13,6 +13,7 @@ class BookCatalogItem(BaseModel):
     page_count: Optional[int] = None
     publication_year: Optional[int] = None
     difficulty_band: Optional[str] = None
+    reading_level: Optional[float] = Field(None, ge=0.0, le=12.0)
     average_student_rating: Optional[float] = Field(None, ge=0.0, le=5.0)
 
     # validators ------------------------------------------------------

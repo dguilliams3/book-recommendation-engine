@@ -17,6 +17,12 @@ from langchain_core.messages import AIMessage
 from langchain.callbacks.base import AsyncCallbackHandler
 import inspect  # for token usage
 from pathlib import Path
+# import service layer
+from .service import (
+    BookRecommendation,
+    RecommendResponse,
+    generate_recommendations,
+)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -104,35 +110,6 @@ server_params = StdioServerParameters(
     env=dict(os.environ),
 )
 
-# @asynccontextmanager
-# async def get_mcp_session():
-#     """Yield an initialized FastMCP ClientSession and ensure it closes cleanly."""
-#     logger.debug("Creating MCP session")
-#     try:
-#         async with stdio_client(server_params) as (reader, writer):
-#             logger.debug("MCP subprocess stdio tunnel established")
-
-#             session = ClientSession(reader, writer, read_timeout_seconds=timedelta(seconds=300))
-
-#             logger.debug("Sending MCP initialize request")
-#             try:
-#                 await session.initialize()
-#                 logger.debug("MCP initialize completed")
-#             except Exception:
-#                 logger.error("MCP initialize failed", exc_info=True)
-#                 raise
-#             try:
-#                 yield session
-#             finally:
-#                 try:
-#                     await session.shutdown()
-#                     logger.debug("MCP session shutdown complete")
-#                 except Exception:
-#                     logger.warning("Error shutting down MCP session", exc_info=True)
-#     except Exception:
-#         logger.error("Failed to create MCP session", exc_info=True)
-#         raise
-
 # --- LLM model for ReAct agent ---------------------------------------
 chat_model = ChatOpenAI(model=S.model_name, api_key=S.openai_api_key, temperature=0.3)
 logger.info("ChatOpenAI model initialised for ReAct agent")
@@ -166,112 +143,43 @@ async def metrics():
 @app.post("/recommend")
 async def recommend(student_id: str, n: int = 3, query: str = "adventure"):
     request_id = uuid.uuid4().hex
+
     logger.info("Recommendation request received", extra={
         "request_id": request_id,
         "student_id": student_id,
         "n": n,
-        "query": query
+        "query": query,
     })
-    
-    start = time.perf_counter()
-    
+
+    started = time.perf_counter()
+
     try:
-        # Get MCP session and build ReAct agent
-        logger.debug("Getting MCP session", extra={"request_id": request_id})
-        async with stdio_client(server_params) as (read, write):
-            logger.info("Server connection established!", extra={"request_id": request_id})
-            # Initialize client session for communication
-            async with ClientSession(
-                read, write, read_timeout_seconds=timedelta(seconds=300)
-            ) as session:
-                # initialize handshake
-                await session.initialize()
-                logger.info("Client session initialized", extra={"request_id": request_id})
+        recs, meta = await generate_recommendations(student_id, query, n, request_id)
 
-                lc_tools = await load_mcp_tools(session)
+        total_duration = time.perf_counter() - started
 
-                agent = create_react_agent(chat_model, lc_tools, name="BookRecommenderAgent")
-                logger.info(f"Agent {agent.name} created and ready to process requests!", extra={"request_id": request_id})
-                
-                # TODO: Have this more structured ahead of time, RAG results included, a PrmpmtTemplate, and so on
-                user_prompt = (
-                    f"Recommend {n} books suitable for a grade-4 student with id {student_id}. "
-                    f"Their interest keywords: '{query}'. Provide JSON list with book_id, title, librarian_blurb."
-                )
-
-                logger.debug(f"Running ReAct agent {agent.name}", extra={"request_id": request_id})
-
-                cb = MetricCallbackHandler()
-                agent_start = time.perf_counter()
-                final_message, response = await ask_agent(agent, user_prompt, callbacks=[cb])
-                agent_duration = time.perf_counter() - agent_start
-                final_message_content = final_message.content
-
-        duration = time.perf_counter() - start
-        logger.info("Recommendation generated successfully", extra={
-            "request_id": request_id,
-            "duration_sec": round(duration, 3),
-            "response_len": len(final_message_content) if isinstance(final_message_content, str) else None
-        })
-        
-        # token usage if available (OpenAI returns in metadata)
-        usage_meta = getattr(final_message, "usage_metadata", None) or {}
-
-        metric_payload = {
-            "request_id": request_id,
-            "student_id": student_id,
-            "duration_sec": agent_duration,
-            "tool_count": len(cb.tools_used),
-            "tools": cb.tools_used[:10],  # avoid huge payloads
-            "error_count": cb.error_count,
-        }
-        metric_payload.update(
-            {k: v for k, v in usage_meta.items() if k in {"input_tokens", "output_tokens", "total_tokens"}}
+        asyncio.create_task(
+            push_metric(
+                "recommendation_served",
+                {
+                    "request_id": request_id,
+                    "student_id": student_id,
+                    "n": n,
+                    "duration_sec": total_duration,
+                    **meta,
+                },
+            )
         )
 
-        asyncio.create_task(push_metric("agent_run", metric_payload))
-        
-        asyncio.create_task(push_metric("recommendation_served", {
-            "duration_sec": duration,
-            "request_id": request_id,
-            "student_id": student_id,
-            "n": n,
-        }))
-        
-        return final_message_content
-        
-    except Exception as e:
-        duration = time.perf_counter() - start
-        logger.error("Recommendation request failed", exc_info=True, extra={
-            "request_id": request_id,
-            "student_id": student_id,
-            "duration_sec": round(duration, 3),
-            "error": str(e)
-        })
-        raise
-    finally:
-        # Capture total token usage
-        usage_metrics = {}
-        if "final_message" in locals():
-            usage_metadata = final_message.usage_metadata
-            usage_metrics = {
-                "input_tokens": usage_metadata.get("input_tokens"),
-                "output_tokens": usage_metadata.get("output_tokens"),
-                "total_tokens": usage_metadata.get("total_tokens"),
-                "input_token_details": usage_metadata.get("input_token_details"),
-                "output_token_details": usage_metadata.get("output_token_details"),
-            }
-        logger.debug(f"Usage metrics: {usage_metrics}")
+        return RecommendResponse(
+            request_id=request_id,
+            duration_sec=round(total_duration, 3),
+            recommendations=recs,
+        )
 
-        # Pull tool names out of your ToolMessage calls
-        # TODO: If the MetricsCallbackHandler is successful, we can remove this.  If not, we'll fall back to this method
-        # tools = []
-        # if "response" in locals():
-        #     for msg in response["messages"]:
-        #         if hasattr(msg, "additional_kwargs") and msg.additional_kwargs.get("tool_calls"):
-        #             for call in msg.additional_kwargs["tool_calls"]:
-        #                 tools.append(call["function"]["name"])
-        #     logger.debug(f"Tools called: {tools}") 
+    except Exception as exc:
+        logger.error("Recommendation request failed", exc_info=True, extra={"request_id": request_id})
+        raise HTTPException(500, "Failed to generate recommendation") from exc
 
 class MetricCallbackHandler(AsyncCallbackHandler):
     """Collect per-run observability data."""
