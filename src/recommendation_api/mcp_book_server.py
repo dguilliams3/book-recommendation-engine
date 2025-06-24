@@ -11,7 +11,7 @@ Exposes:
 All tools are **read-only** w.r.t. external world and safe for parallel calls.
 """
 
-import asyncio, asyncpg
+import asyncio, asyncpg, sys, logging
 from pathlib import Path
 from typing import List
 
@@ -290,6 +290,10 @@ async def get_book_recommendations_for_group(student_ids: List[str], n: int = 3)
 if __name__ == "__main__":           # pragma: no cover
     logger.info("Starting MCP book server")
     try:
+        # Ensure logger does not write to stdout (stdin/stdout used by FastMCP JSON-RPC)
+        for h in list(logger.handlers):
+            if isinstance(h, logging.StreamHandler):
+                h.stream = sys.stderr
         mcp.run(transport="stdio") 
         logger.info("MCP book server completed successfully")
     except Exception as e:

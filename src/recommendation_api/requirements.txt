@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 langchain
 langchain-openai
+langchain-community
 langgraph
 openai>=1.10.0
 mcp
@@ -14,4 +15,5 @@ asyncpg>=0.29.0
 aiohttp>=3.9.1
 textstat>=0.7.3
 pydantic>=2.5.0
-pydantic-settings>=2.1.0 
+pydantic-settings>=2.1.0
+faiss-cpu 

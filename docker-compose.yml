@@ -158,7 +158,11 @@ services:
       - OPENAI_API_KEY
       - SIMILARITY_THRESHOLD=${SIMILARITY_THRESHOLD}
       - HALF_LIFE_DAYS=${HALF_LIFE_DAYS}
-    depends_on: [postgres, kafka]
+    depends_on:
+      postgres:
+        condition: service_started
+      kafka:
+        condition: service_healthy
 
   book_enrichment_worker:
     build:

@@ -6,4 +6,5 @@ pydantic>=2.5.0
 pydantic-settings>=2.1.0
 faiss-cpu
 filelock
-prometheus-client 
+prometheus-client
+asyncpg>=0.29.0 

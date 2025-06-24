@@ -24,7 +24,18 @@ async def fetch_profile(student_id: str) -> str:
     await conn.close()
     if not row:
         return ""
-    hist = row["histogram"] or {}
+    hist_data = row["histogram"]
+    
+    # Parse JSON if it's a string, otherwise use as-is
+    if isinstance(hist_data, str):
+        try:
+            hist = json.loads(hist_data) if hist_data else {}
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse histogram JSON for student {student_id}")
+            hist = {}
+    else:
+        hist = hist_data or {}
+    
     # Convert histogram into pseudo document: token repeated count times
     parts = []
     for token, cnt in hist.items():
@@ -53,7 +64,7 @@ async def handle_profile_event(evt: dict):
     vec = EMB.embed_query(doc)
     await upsert_embedding(student_id, vec)
     emb_evt = StudentEmbeddingChangedEvent(student_id=student_id)
-    await event_producer.publish_event(STUDENT_EMBEDDING_TOPIC, emb_evt.dict())
+    await event_producer.publish_event(STUDENT_EMBEDDING_TOPIC, emb_evt.model_dump())
     logger.info("Student embedding updated", extra={"student_id": student_id})
 
 async def main():

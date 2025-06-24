@@ -48,7 +48,7 @@ async def handle_checkout(evt: dict):
     await update_profile_cache(student_id, hist)
     # emit event
     prof_evt = StudentProfileChangedEvent(student_id=student_id)
-    await event_producer.publish_event(STUDENT_PROFILE_TOPIC, prof_evt.dict())
+    await event_producer.publish_event(STUDENT_PROFILE_TOPIC, prof_evt.model_dump())
     logger.info("Student profile updated", extra={"student_id": student_id})
 
 async def main():

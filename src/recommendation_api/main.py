@@ -1,7 +1,6 @@
 import asyncio, json, os, uuid, time
 from fastapi import FastAPI, HTTPException
 from starlette.responses import JSONResponse
-from aiokafka import AIOKafkaProducer
 from mcp import StdioServerParameters, stdio_client, ClientSession
 from common import SettingsInstance as S
 from common.structured_logging import get_logger
@@ -13,6 +12,9 @@ from . import db_models
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
+from common.kafka_utils import event_producer
+from contextlib import asynccontextmanager
+from datetime import timedelta
 
 app = FastAPI(title="Book‑Recommendation‑API")
 logger = get_logger(__name__)
@@ -41,35 +43,53 @@ async def _ensure_tables():
 
 # --- metrics -----------------------------------------------------------
 logger.info("Initializing Kafka producer for metrics")
-producer = AIOKafkaProducer(bootstrap_servers=S.kafka_bootstrap)
 TOPIC = "api_metrics"
 
 async def push_metric(event: str, extra: dict | None = None):
-    try:
-        payload = {"event": event, "timestamp": time.time(), "request_id": uuid.uuid4().hex}
-        if extra:
-            payload.update(extra)
-        await producer.send_and_wait(TOPIC, json.dumps(payload).encode())
-        logger.debug("Metric pushed", extra={"event": event, "payload": payload})
-    except Exception as e:
-        logger.error("Failed to push metric", exc_info=True, extra={"event": event})
+    """Send metric to Kafka without blocking the caller."""
+    # Compose payload once
+    payload = {"event": event, "timestamp": time.time(), "request_id": uuid.uuid4().hex}
+    if extra:
+        payload.update(extra)
+
+    async def _send():
+        try:
+            await event_producer.publish_event(TOPIC, payload)
+            logger.debug("Metric pushed", extra={"event": event, "payload": payload})
+        except Exception:
+            logger.error("Failed to push metric", exc_info=True, extra={"event": event})
+
+    # Fire-and-forget so the caller returns immediately
+    asyncio.create_task(_send())
 
 # --- FastMCP lifecycle -------------------------------------------------
 logger.info("Setting up FastMCP server parameters")
+
+# Pass through current environment so the child process has the same
+# DB_URL / OPENAI_API_KEY etc.  FastMCP will merge with its defaults.
 server_params = StdioServerParameters(
     command="python",
     args=["-m", "recommendation_api.mcp_book_server"],
+    env=dict(os.environ),
 )
 
+@asynccontextmanager
 async def get_mcp_session():
+    """Yield an initialized FastMCP ClientSession and ensure it closes cleanly."""
     logger.debug("Creating MCP session")
     try:
-        reader, writer = await stdio_client(server_params)
-        session = ClientSession(reader, writer)
-        await session.initialize()
-        logger.debug("MCP session initialized successfully")
-        return session
-    except Exception as e:
+        async with stdio_client(server_params) as (reader, writer):
+            session = ClientSession(reader, writer, read_timeout_seconds=timedelta(seconds=300))
+            await session.initialize()
+            logger.debug("MCP session initialized successfully")
+            try:
+                yield session
+            finally:
+                try:
+                    await session.shutdown()
+                except Exception:
+                    logger.warning("Error shutting down MCP session", exc_info=True)
+    except Exception:
         logger.error("Failed to create MCP session", exc_info=True)
         raise
 
@@ -97,9 +117,7 @@ def health():
 @app.get("/metrics")
 async def metrics():
     logger.debug("Metrics endpoint requested")
-    buffer_size = producer._buffer_size
-    logger.debug("Producer buffer size", extra={"buffer_size": buffer_size})
-    return JSONResponse({"producer_buffer": buffer_size})
+    return JSONResponse({"status": "ok"})
 
 @app.post("/recommend")
 async def recommend(student_id: str, n: int = 3, query: str = "adventure"):
@@ -116,8 +134,10 @@ async def recommend(student_id: str, n: int = 3, query: str = "adventure"):
     try:
         # Get MCP session and tools
         logger.debug("Getting MCP session", extra={"request_id": request_id})
-        async with await get_mcp_session() as mcp:
-            tools = await mcp.load_tools()
+        async with get_mcp_session() as mcp:
+            lc_tools = await load_mcp_tools(mcp)
+            # convert list to dict keyed by tool name for convenience
+            tools = {t.name: t for t in lc_tools}
             if "search_catalog" not in tools:
                 logger.error("MCP tool 'search_catalog' not found", extra={"request_id": request_id})
                 raise HTTPException(500, "MCP tool not found")
@@ -166,10 +186,6 @@ async def recommend(student_id: str, n: int = 3, query: str = "adventure"):
 async def startup_event():
     logger.info("Starting up recommendation API")
     try:
-        # Start Kafka producer
-        await producer.start()
-        logger.info("Kafka producer started successfully")
-        
         # Ensure database tables exist
         await _ensure_tables()
         
@@ -181,7 +197,6 @@ async def startup_event():
 async def shutdown_event():
     logger.info("Shutting down recommendation API")
     try:
-        await producer.stop()
-        logger.info("Kafka producer stopped successfully")
-    except Exception as e:
+        await event_producer.close()
+    except Exception:
         logger.error("Error stopping Kafka producer", exc_info=True) 

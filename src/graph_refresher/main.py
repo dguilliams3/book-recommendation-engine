@@ -21,7 +21,7 @@ import aiokafka, asyncpg
 from langchain_openai import OpenAIEmbeddings
 from common import SettingsInstance as S
 from common.structured_logging import get_logger
-from common.kafka_utils import KafkaEventConsumer
+from common.kafka_utils import KafkaEventConsumer, event_producer
 from common.events import BOOK_EVENTS_TOPIC
 
 logger = get_logger(__name__)
@@ -264,23 +264,15 @@ async def main():
     # Publish metrics
     logger.info("Publishing graph delta metrics")
     try:
-        producer = aiokafka.AIOKafkaProducer(bootstrap_servers=S.kafka_bootstrap)
-        await producer.start()
-        
         metric_payload = {
-            "edges": len(insert_rows), 
-            "timestamp": time.time(), 
-            "run_id": uuid.uuid4().hex
+            "edges": len(insert_rows),
+            "timestamp": time.time(),
+            "run_id": uuid.uuid4().hex,
         }
-        
-        await producer.send_and_wait(
-            "graph_delta",
-            json.dumps(metric_payload).encode(),
-        )
-        await producer.stop()
-        
+
+        await event_producer.publish_event("graph_delta", metric_payload)
         logger.info("Graph delta metrics published successfully", extra=metric_payload)
-    except Exception as e:
+    except Exception:
         logger.error("Failed to publish graph delta metrics", exc_info=True)
     
     duration = time.perf_counter() - t0

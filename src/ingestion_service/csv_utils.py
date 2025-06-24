@@ -16,9 +16,27 @@ def _load_csv(path: Path) -> Iterable[dict]:
                 # Clean empty strings and whitespace
                 cleaned_row = {}
                 for k, v in row.items():
+                    # Fail fast if DictReader produced extra columns (key == None) which indicates more cells than headers.
+                    if k is None or (isinstance(k, str) and k.strip() == ""):
+                        extra_cells = v if isinstance(v, list) else [v]
+                        logger.error(
+                            "Malformed CSV row: extra cells detected", 
+                            extra={
+                                "file_path": str(path), 
+                                "line_num": reader.line_num, 
+                                "extra_cells": extra_cells,
+                            },
+                        )
+                        raise ValueError(
+                            f"{path.name}: line {reader.line_num} contains {len(extra_cells)} extra value(s) – "
+                            "likely due to an unquoted comma or trailing delimiter."
+                        )
+
                     # If the CSV parser produced a list (e.g., unescaped commas), join into one string
                     if isinstance(v, list):
                         v = ",".join(str(x) for x in v)
+
+                    # Normalise whitespace and empty strings
                     if v is None or str(v).strip() == "":
                         cleaned_row[k] = None
                     else:
