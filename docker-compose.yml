@@ -16,6 +16,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    description: "PostgreSQL database with pgvector extension storing catalog, student, and checkout data for the entire system."
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.1
@@ -31,6 +32,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    description: "Coordinates and manages Kafka broker metadata for event-driven services."
 
   kafka:
     image: confluentinc/cp-kafka:7.6.1
@@ -56,6 +58,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
+    description: "Primary Kafka broker that transports events, logs, and metrics between microservices."
 
   ingestion_service:
     build:
@@ -78,6 +81,7 @@ services:
         condition: service_healthy
       postgres:
         condition: service_started
+    description: "Loads seed CSV data, populates PostgreSQL tables, and builds/updates the FAISS vector store for books."
 
   recommendation_api:
     build:
@@ -101,6 +105,7 @@ services:
     depends_on:
       ingestion_service:
         condition: service_started
+    description: "FastAPI service exposing book-recommendation endpoints and registering MCP tools for LLM agents."
 
   streamlit_ui:
     build:
@@ -113,6 +118,7 @@ services:
     ports:
       - "8501:8501"
     depends_on: [recommendation_api]
+    description: "Streamlit dashboard that teachers and students use to search the catalog and receive recommendations."
 
   metrics_consumer:
     build:
@@ -127,6 +133,7 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+    description: "Kafka consumer that aggregates metrics events for monitoring and performance dashboards."
 
   log_consumer:
     build:
@@ -143,6 +150,7 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+    description: "Consumes structured log events from Kafka and writes log files to the shared volume for debugging."
 
   graph_refresher:
     build:
@@ -163,6 +171,7 @@ services:
         condition: service_started
       kafka:
         condition: service_healthy
+    description: "Periodically recomputes similarity graphs and caches derived embeddings for recommendation algorithms."
 
   book_enrichment_worker:
     build:
@@ -177,6 +186,7 @@ services:
     environment:
       - OPENAI_API_KEY
     depends_on: [postgres]
+    description: "Enriches catalog entries with external metadata (e.g., Google Books, Open Library) and readability scores."
 
   book_vector_worker:
     build:
@@ -193,6 +203,7 @@ services:
         condition: service_healthy
       postgres:
         condition: service_started
+    description: "Generates and updates vector embeddings for books when catalog change events are received."
 
   student_profile_worker:
     build:
@@ -207,6 +218,7 @@ services:
         condition: service_healthy
       postgres:
         condition: service_started
+    description: "Updates cached student reading-level histograms upon checkout events and publishes profile change notifications."
 
   student_embedding_worker:
     build:
@@ -221,6 +233,7 @@ services:
         condition: service_healthy
       postgres:
         condition: service_started
+    description: "Creates vector embeddings representing individual students' reading preferences for similarity computations."
 
   similarity_worker:
     build:
@@ -235,6 +248,7 @@ services:
         condition: service_healthy
       postgres:
         condition: service_started
+    description: "Computes and stores similarity scores between students based on their embedding vectors."
 
   # ---- optional stubs ---------------------------------
   tts_worker:
@@ -250,6 +264,7 @@ services:
     command: ["sleep","3600"]
     deploy:
       replicas: ${ENABLE_TTS}
+    description: "Placeholder stub for future text-to-speech generation capability (inactive when replicas=0)."
 
   image_worker:
     build:
@@ -264,6 +279,7 @@ services:
     command: ["sleep","3600"]
     deploy:
       replicas: ${ENABLE_IMAGE}
+    description: "Placeholder stub for future book-cover or illustration image generation service (inactive when replicas=0)."
 
 volumes:
   pgdata: 

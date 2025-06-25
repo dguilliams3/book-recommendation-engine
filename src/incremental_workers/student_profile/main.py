@@ -14,20 +14,52 @@ from common.structured_logging import get_logger
 logger = get_logger(__name__)
 
 async def build_profile(student_id: str) -> dict:
-    """Aggregate checkout history into a histogram of difficulty bands."""
+    """Aggregate a student's checkout history into a difficulty-band histogram.
+
+    Parameters
+    ----------
+    student_id : str
+        Primary key of the student whose profile should be rebuilt.
+
+    Returns
+    -------
+    dict
+        Mapping of `difficulty_band` → count.  Example: ``{"early_elementary": 3, "late_elementary": 1}``.
+    """
     pg_url = str(S.db_url).replace("postgresql+asyncpg://", "postgresql://")
     conn = await asyncpg.connect(pg_url)
     rows = await conn.fetch(
-        """SELECT difficulty_band FROM checkout JOIN catalog USING(book_id)
+        """SELECT difficulty_band, reading_level FROM checkout JOIN catalog USING(book_id)
            WHERE student_id=$1""",
         student_id,
     )
     await conn.close()
-    bands = [r["difficulty_band"] for r in rows if r["difficulty_band"]]
+
+    def level_to_band(g: float | None):
+        if g is None:
+            return None
+        if g <= 2.0:
+            return "beginner"
+        if g <= 4.0:
+            return "early_elementary"
+        if g <= 6.0:
+            return "late_elementary"
+        if g <= 8.0:
+            return "middle_school"
+        return "advanced"
+
+    bands: list[str] = []
+    for r in rows:
+        band = r["difficulty_band"]
+        if not band and r["reading_level"] is not None:
+            band = level_to_band(r["reading_level"])
+        if band:
+            bands.append(band)
     hist = Counter(bands)
     return dict(hist)
 
 async def update_profile_cache(student_id: str, histogram: dict):
+    """Persist the computed histogram to the `student_profile_cache` table."""
     pg_url = str(S.db_url).replace("postgresql+asyncpg://", "postgresql://")
     conn = await asyncpg.connect(pg_url)
     await conn.execute(
@@ -40,6 +72,7 @@ async def update_profile_cache(student_id: str, histogram: dict):
     await conn.close()
 
 async def handle_checkout(evt: dict):
+    """Kafka event handler triggered for every *checkout_added* event."""
     student_id = evt.get("student_id")
     if not student_id:
         return
@@ -52,6 +85,7 @@ async def handle_checkout(evt: dict):
     logger.info("Student profile updated", extra={"student_id": student_id})
 
 async def main():
+    """Entry point for the **student_profile_worker** container."""
     consumer = KafkaEventConsumer(CHECKOUT_EVENTS_TOPIC, "student_profile_worker")
     await consumer.start(handle_checkout)
 
