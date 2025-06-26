@@ -1,20 +1,50 @@
-import asyncio, json, os, uuid, time
-from fastapi import FastAPI, HTTPException
+import asyncio, json, os, uuid, time, sys
+from fastapi import FastAPI, HTTPException, Request
 from starlette.responses import JSONResponse
-from aiokafka import AIOKafkaProducer
 from mcp import StdioServerParameters, stdio_client, ClientSession
-from ..common import SettingsInstance as S
-from ..common.structured_logging import get_logger
-from langgraph.graph import Graph
-from langchain_openai import OpenAI
+from common import SettingsInstance as S
+from common.structured_logging import get_logger, SERVICE_NAME
 from langchain.prompts import ChatPromptTemplate
 from sqlalchemy.ext.asyncio import create_async_engine
 from . import db_models
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
+from common.kafka_utils import event_producer
+from contextlib import asynccontextmanager
+from datetime import timedelta
+from langchain_core.messages import AIMessage
+from langchain.callbacks.base import AsyncCallbackHandler
+import inspect  # for token usage
+from pathlib import Path
+# import service layer
+from .service import (
+    BookRecommendation,
+    RecommendResponse,
+    generate_recommendations,
+)
+from common.metrics import REQUEST_COUNTER, REQUEST_LATENCY
 
-app = FastAPI(title="Book‑Recommendation‑API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage startup and shutdown tasks using FastAPI lifespan events."""
+    logger.info("Starting up recommendation API")
+    try:
+        await _ensure_tables()
+    except Exception:
+        logger.error("Failed to start up recommendation API", exc_info=True)
+        raise
+
+    # Application runs during this yield
+    yield
+
+    logger.info("Shutting down recommendation API")
+    try:
+        await event_producer.close()
+    except Exception:
+        logger.error("Error stopping Kafka producer", exc_info=True)
+
+app = FastAPI(title="Book-Recommendation-API", lifespan=lifespan)
 logger = get_logger(__name__)
 
 # --- auto-DDL setup ----------------------------------------------------
@@ -41,52 +71,64 @@ async def _ensure_tables():
 
 # --- metrics -----------------------------------------------------------
 logger.info("Initializing Kafka producer for metrics")
-producer = AIOKafkaProducer(bootstrap_servers=S.kafka_bootstrap)
 TOPIC = "api_metrics"
 
 async def push_metric(event: str, extra: dict | None = None):
-    try:
-        payload = {"event": event, "timestamp": time.time(), "request_id": uuid.uuid4().hex}
-        if extra:
-            payload.update(extra)
-        await producer.send_and_wait(TOPIC, json.dumps(payload).encode())
-        logger.debug("Metric pushed", extra={"event": event, "payload": payload})
-    except Exception as e:
-        logger.error("Failed to push metric", exc_info=True, extra={"event": event})
+    """Send metric to Kafka without blocking the caller."""
+    # Compose payload once
+    payload = {"event": event, "timestamp": time.time(), "request_id": uuid.uuid4().hex}
+    if extra:
+        payload.update(extra)
+
+    async def _send():
+        try:
+            await event_producer.publish_event(TOPIC, payload)
+            logger.debug("Metric pushed", extra={"event": event, "payload": payload})
+        except Exception:
+            logger.error("Failed to push metric", exc_info=True, extra={"event": event})
+
+    # Fire-and-forget so the caller returns immediately
+    asyncio.create_task(_send())
 
 # --- FastMCP lifecycle -------------------------------------------------
 logger.info("Setting up FastMCP server parameters")
+
+# On Windows we *must* use ProactorEventLoopPolicy because Fast-MCP launches a
+# subprocess and `asyncio.create_subprocess_exec` only works with the Proactor
+# loop.  This line is mostly relevant for code paths that import this module
+# directly (e.g. Streamlit inside Docker).  When you start uvicorn from the
+# command line you still have to ensure the process is started with the
+# Proactor policy (see run_api_windows.py helper script).
+if os.name == "nt":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+# build absolute path to the MCP server script so subprocess can locate it when cwd changes
+_mcp_path = Path(__file__).parent / "mcp_book_server.py"
+
 server_params = StdioServerParameters(
     command="python",
-    args=["-m", "recommendation_api.mcp_book_server"],
+    args=[str(_mcp_path)],
+    env=dict(os.environ),
 )
 
-async def get_mcp_session():
-    logger.debug("Creating MCP session")
-    try:
-        reader, writer = await stdio_client(server_params)
-        session = ClientSession(reader, writer)
-        await session.initialize()
-        logger.debug("MCP session initialized successfully")
-        return session
-    except Exception as e:
-        logger.error("Failed to create MCP session", exc_info=True)
-        raise
+# --- LLM model for ReAct agent ---------------------------------------
+chat_model = ChatOpenAI(model=S.model_name, api_key=S.openai_api_key, temperature=0.3)
+logger.info("ChatOpenAI model initialised for ReAct agent")
 
-# --- LangGraph flow ----------------------------------------------------
-logger.info("Initializing LangGraph recommendation flow")
-prompt = ChatPromptTemplate.from_template(
-    "You are a friendly librarian. Given the following JSON from `search_catalog`, "
-    "pick the best {n} books for elementary grade‑4 student {student_id}. "
-    "Return JSON list of objects: book_id, title, librarian_blurb.\n\n{catalog_json}"
-)
-llm = OpenAI(model=S.model_name, api_key=S.openai_api_key, temperature=0.3)
+async def ask_agent(agent, query: str, callbacks=None):
+    logger.info("Executing agent query:")
+    logger.debug(f"Query: {query}")
+    # LangChain runnables expect callbacks via the `config` dict
+    cfg = {"callbacks": callbacks} if callbacks else None
+    response = await agent.ainvoke({"messages": query}, config=cfg)
 
-graph = Graph()
-graph.add_node("recommend", llm)
-graph.set_entry_point("recommend")
-langgraph_chain = graph.compile()
-logger.info("LangGraph flow initialized successfully")
+    # Get the final AI message (the actual analysis)
+    final_message = next(
+        msg for msg in reversed(response["messages"]) if isinstance(msg, AIMessage) and msg.content
+    )
+    logger.debug(f"Final message: {final_message}")
+    # Return both the final message and the response json with metadata
+    return final_message, response
 
 # --- endpoints ---------------------------------------------------------
 @app.get("/health")
@@ -97,91 +139,103 @@ def health():
 @app.get("/metrics")
 async def metrics():
     logger.debug("Metrics endpoint requested")
-    buffer_size = producer._buffer_size
-    logger.debug("Producer buffer size", extra={"buffer_size": buffer_size})
-    return JSONResponse({"producer_buffer": buffer_size})
+    return JSONResponse({"status": "ok"})
 
 @app.post("/recommend")
 async def recommend(student_id: str, n: int = 3, query: str = "adventure"):
     request_id = uuid.uuid4().hex
+
     logger.info("Recommendation request received", extra={
         "request_id": request_id,
         "student_id": student_id,
         "n": n,
-        "query": query
+        "query": query,
     })
-    
-    start = time.perf_counter()
-    
+
+    started = time.perf_counter()
+
     try:
-        # Get MCP session and tools
-        logger.debug("Getting MCP session", extra={"request_id": request_id})
-        async with await get_mcp_session() as mcp:
-            tools = await mcp.load_tools()
-            if "search_catalog" not in tools:
-                logger.error("MCP tool 'search_catalog' not found", extra={"request_id": request_id})
-                raise HTTPException(500, "MCP tool not found")
-            
-            logger.debug("Searching catalog", extra={"request_id": request_id, "query": query})
-            catalog_json = await tools["search_catalog"](keyword=query, k=n*3)
-            logger.debug("Catalog search completed", extra={
-                "request_id": request_id,
-                "results_count": len(catalog_json) if isinstance(catalog_json, list) else 0
-            })
-        
-        # Generate recommendations
-        logger.debug("Generating recommendations with LangGraph", extra={"request_id": request_id})
-        resp = await langgraph_chain.ainvoke(
-            {"n": n, "student_id": student_id, "catalog_json": json.dumps(catalog_json)}
+        recs, meta = await generate_recommendations(student_id, query, n, request_id)
+
+        total_duration = time.perf_counter() - started
+
+        asyncio.create_task(
+            push_metric(
+                "recommendation_served",
+                {
+                    "request_id": request_id,
+                    "student_id": student_id,
+                    "n": n,
+                    "duration_sec": total_duration,
+                    **meta,
+                },
+            )
         )
-        
-        duration = time.perf_counter() - start
-        logger.info("Recommendation generated successfully", extra={
-            "request_id": request_id,
-            "duration_sec": round(duration, 3),
-            "recommendations_count": len(resp) if isinstance(resp, list) else 0
-        })
-        
-        # Push metrics
-        await push_metric("recommendation_served", {
-            "duration_sec": duration,
-            "request_id": request_id,
-            "student_id": student_id,
-            "n": n
-        })
-        
-        return resp
-        
-    except Exception as e:
-        duration = time.perf_counter() - start
-        logger.error("Recommendation request failed", exc_info=True, extra={
-            "request_id": request_id,
-            "student_id": student_id,
-            "duration_sec": round(duration, 3),
-            "error": str(e)
-        })
-        raise
 
-@app.on_event("startup")
-async def startup_event():
-    logger.info("Starting up recommendation API")
-    try:
-        # Start Kafka producer
-        await producer.start()
-        logger.info("Kafka producer started successfully")
-        
-        # Ensure database tables exist
-        await _ensure_tables()
-        
-    except Exception as e:
-        logger.error("Failed to start up recommendation API", exc_info=True)
-        raise
+        return RecommendResponse(
+            request_id=request_id,
+            duration_sec=round(total_duration, 3),
+            recommendations=recs,
+        )
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    logger.info("Shutting down recommendation API")
-    try:
-        await producer.stop()
-        logger.info("Kafka producer stopped successfully")
-    except Exception as e:
-        logger.error("Error stopping Kafka producer", exc_info=True) 
+    except Exception as exc:
+        logger.error("Recommendation request failed", exc_info=True, extra={"request_id": request_id})
+        raise HTTPException(500, "Failed to generate recommendation") from exc
+
+class MetricCallbackHandler(AsyncCallbackHandler):
+    """Collect per-run observability data."""
+
+    def __init__(self):
+        self.tools_used: list[str] = []
+        self.error_count: int = 0
+
+    async def on_tool_start(self, serialized, input_str, **kwargs):  # type: ignore[override]
+        name = (
+            serialized.get("name", "unknown") if isinstance(serialized, dict) else "unknown"
+        )
+        self.tools_used.append(name)
+
+    async def on_tool_error(self, error, **kwargs):  # type: ignore[override]
+        self.error_count += 1 
+
+# ---------------------------------------------------------------------------
+# Prometheus middleware (lightweight – no external deps beyond prometheus_client)
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def _prometheus_middleware(request: Request, call_next):  # noqa: D401
+    """Track per-request latency and count using Prometheus helpers."""
+
+    start_time = time.perf_counter()
+    response = await call_next(request)
+
+    duration = time.perf_counter() - start_time
+    endpoint = request.url.path
+
+    # Record metrics (labels are no-ops if Prometheus disabled)
+    REQUEST_LATENCY.labels(service=SERVICE_NAME, endpoint=endpoint).observe(duration)
+    REQUEST_COUNTER.labels(
+        service=SERVICE_NAME,
+        method=request.method,
+        endpoint=endpoint,
+        status_code=response.status_code,
+    ).inc()
+
+    return response
+
+# ---------------------------------------------------------------------------
+# Script entry-point (mirrors pattern from main_security_agent_server.py)
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":  # pragma: no cover
+    import uvicorn
+
+    # Ensure correct loop policy when executed directly (e.g. python -m ...)
+    if os.name == "nt":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+    uvicorn.run(
+        "src.recommendation_api.main:app",
+        host="127.0.0.1",
+        port=S.api_port,
+        reload=False,
+    ) 

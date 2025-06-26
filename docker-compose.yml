@@ -1,4 +1,5 @@
 services:
+  # PostgreSQL database with pgvector extension storing catalog, student, and checkout data for the entire system.
   postgres:
     image: ankane/pgvector:latest
     platform: linux/amd64
@@ -17,6 +18,8 @@ services:
       timeout: 5s
       retries: 5
 
+
+  # Coordinates and manages Kafka broker metadata for event-driven services.
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.1
     platform: linux/amd64
@@ -25,12 +28,14 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_4LW_COMMANDS_WHITELIST: "ruok,stat"
     healthcheck:
       test: echo "ruok" | nc -w 2 localhost 2181 | grep imok
       interval: 5s
       timeout: 5s
       retries: 5
 
+# Primary Kafka broker that transports events, logs, and metrics between microservices.
   kafka:
     image: confluentinc/cp-kafka:7.6.1
     platform: linux/amd64
@@ -51,11 +56,12 @@ services:
       KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1
     healthcheck:
-      test: ["CMD", "bash", "-ec", "kafka-topics.sh --bootstrap-server kafka:9092 --list || exit 1"]
+      test: ["CMD", "bash", "-ec", "/usr/bin/kafka-topics --bootstrap-server localhost:9092 --list || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 6
 
+  # "Loads seed CSV data, populates PostgreSQL tables, and builds/updates the FAISS vector store for books."
   ingestion_service:
     build:
       context: .
@@ -65,15 +71,20 @@ services:
     env_file:
       - .env
     volumes:
-      - ./data:/data
+      - ./data:/app/data
     environment:
       - OPENAI_API_KEY
       - OPENAI_MODEL=${OPENAI_MODEL}
       - VECTOR_STORE_TYPE=${VECTOR_STORE_TYPE}
       - DB_URL=${DB_URL}
       - KAFKA_BROKERS=${KAFKA_BROKERS}
-    depends_on: [postgres, kafka]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_started
 
+  # FastAPI service exposing book-recommendation endpoints and registering MCP tools for LLM agents.
   recommendation_api:
     build:
       context: .
@@ -83,7 +94,7 @@ services:
     env_file:
       - .env
     volumes:
-      - ./data:/data
+      - ./data:/app/data
     ports:
       - "8000:8000"
     environment:
@@ -93,8 +104,12 @@ services:
       - DB_URL=${DB_URL}
       - KAFKA_BROKERS=${KAFKA_BROKERS}
       - PYTHONPATH=/app:/app/common
-    depends_on: [ingestion_service]
+    depends_on:
+      ingestion_service:
+        condition: service_started
 
+
+# Streamlit dashboard that teachers and students use to search the catalog and receive recommendations.
   streamlit_ui:
     build:
       context: .
@@ -106,7 +121,10 @@ services:
     ports:
       - "8501:8501"
     depends_on: [recommendation_api]
+    
 
+  
+  # Kafka consumer that aggregates metrics events for monitoring and performance dashboards.
   metrics_consumer:
     build:
       context: .
@@ -120,7 +138,9 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+    
 
+  # Consumes structured log events from Kafka and writes log files to the shared volume for debugging.
   log_consumer:
     build:
       context: .
@@ -137,6 +157,8 @@ services:
       kafka:
         condition: service_healthy
 
+
+    # Periodically recomputes similarity graphs and caches derived embeddings for recommendation algorithms.
   graph_refresher:
     build:
       context: .
@@ -146,13 +168,18 @@ services:
     env_file:
       - .env
     volumes:
-      - ./data:/data
+      - ./data:/app/data
     environment:
       - OPENAI_API_KEY
       - SIMILARITY_THRESHOLD=${SIMILARITY_THRESHOLD}
       - HALF_LIFE_DAYS=${HALF_LIFE_DAYS}
-    depends_on: [postgres, kafka]
+    depends_on:
+      postgres:
+        condition: service_started
+      kafka:
+        condition: service_healthy
 
+  # Enriches catalog entries with external metadata (e.g., Google Books, Open Library) and readability scores.
   book_enrichment_worker:
     build:
       context: .
@@ -162,12 +189,76 @@ services:
     env_file:
       - .env
     volumes:
-      - ./data:/data
+      - ./data:/app/data
     environment:
       - OPENAI_API_KEY
     depends_on: [postgres]
 
+
+  # Generates and updates vector embeddings for books when catalog change events are received.
+  book_vector_worker:
+    build:
+      context: .
+      dockerfile: src/incremental_workers/book_vector/Dockerfile
+    platform: linux/amd64
+    container_name: book_vector_worker
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+
+  # Updates cached student reading-level histograms upon checkout events and publishes profile change notifications.
+  student_profile_worker:
+    build:
+      context: .
+      dockerfile: src/incremental_workers/student_profile/Dockerfile
+    platform: linux/amd64
+    container_name: student_profile_worker
+    env_file:
+      - .env
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+
+  # Creates vector embeddings representing individual students' reading preferences for similarity computations.
+  student_embedding_worker:
+    build:
+      context: .
+      dockerfile: src/incremental_workers/student_embedding/Dockerfile
+    platform: linux/amd64
+    container_name: student_embedding_worker
+    env_file:
+      - .env
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+
+  # Computes and stores similarity scores between students based on their embedding vectors.
+  similarity_worker:
+    build:
+      context: .
+      dockerfile: src/incremental_workers/similarity/Dockerfile
+    platform: linux/amd64
+    container_name: similarity_worker
+    env_file:
+      - .env
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+
   # ---- optional stubs ---------------------------------
+  # Placeholder stub for future text-to-speech generation capability (inactive when replicas=0).
   tts_worker:
     build:
       context: .
@@ -182,6 +273,7 @@ services:
     deploy:
       replicas: ${ENABLE_TTS}
 
+  # Placeholder stub for future book-cover or illustration image generation service (inactive when replicas=0).
   image_worker:
     build:
       context: .
@@ -195,6 +287,19 @@ services:
     command: ["sleep","3600"]
     deploy:
       replicas: ${ENABLE_IMAGE}
+
+# ---------------- Monitoring stack -------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    platform: linux/amd64
+    container_name: prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      kafka:
+        condition: service_healthy
 
 volumes:
   pgdata: 

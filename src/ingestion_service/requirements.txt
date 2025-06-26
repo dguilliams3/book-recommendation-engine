@@ -10,3 +10,4 @@ pandas
 pydantic>=2.5.0
 faiss-cpu
 pydantic-settings>=2.1.0
+textstat>=0.7.3

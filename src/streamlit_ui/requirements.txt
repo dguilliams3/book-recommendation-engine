@@ -2,3 +2,8 @@ streamlit>=1.28.1
 requests>=2.31.0
 pydantic>=2.5.0 
 nest_asyncio
+aiokafka>=0.12.0
+pydantic-settings>=2.1.0
+pandas>=2.0.0
+SQLAlchemy>=2.0.0
+psycopg2-binary>=2.9.9

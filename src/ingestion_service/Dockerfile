@@ -29,6 +29,10 @@ COPY data /app/data
 COPY src/ingestion_service /app/ingestion_service
 COPY src/cli.py /app/cli.py
 
+# Include shared utilities used by the ingestion pipeline (e.g. readability estimator)
+COPY src/recommendation_api /app/recommendation_api
+COPY src/embedding /app/embedding
+
 ENV PYTHONPATH="/app"
 
 # Keep the original command as default, but allow CLI override

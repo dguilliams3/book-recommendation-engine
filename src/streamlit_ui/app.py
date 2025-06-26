@@ -11,6 +11,8 @@ from sqlalchemy import create_engine
 logger = get_logger(__name__)
 
 API_URL = f"http://recommendation_api:{S.api_port}/recommend"
+API_TIMEOUT = int(os.getenv("STREAMLIT_API_TIMEOUT_SEC", "30"))
+MAX_RETRIES = 3
 
 async def get_latest_metrics():
     """Fetch the latest metrics from Kafka"""
@@ -63,28 +65,34 @@ async def get_latest_metrics():
         return []
 
 def get_recommendation(student_id: str, reading_level: str, interests: str):
-    """Get book recommendation from API"""
-    try:
-        response = requests.post(
-            API_URL,
-            json={
-                "student_id": student_id,
-                "reading_level": reading_level,
-                "interests": interests
-            },
-            timeout=10
-        )
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.ConnectionError:
-        logger.warning("API service not available")
-        return {"error": "API service not running. Please start the recommendation API."}
-    except requests.exceptions.Timeout:
-        logger.warning("API request timed out")
-        return {"error": "API request timed out. Please try again."}
-    except Exception as e:
-        logger.error(f"API request failed: {e}")
-        return {"error": f"API request failed: {str(e)}"}
+    """Get book recommendation from API (api expects query params)."""
+    params = {
+        "student_id": student_id,
+        "query": interests or "adventure",
+        "n": 3,
+    }
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = requests.post(
+                API_URL,
+                params=params,
+                timeout=API_TIMEOUT,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.Timeout:
+            logger.warning(
+                "API request timed out", extra={"attempt": attempt, "timeout_sec": API_TIMEOUT}
+            )
+            if attempt == MAX_RETRIES:
+                return {"error": f"API request timed out after {MAX_RETRIES} attempts. Please try again."}
+        except requests.exceptions.ConnectionError:
+            logger.warning("API service not available")
+            return {"error": "API service not running. Please start the recommendation API."}
+        except Exception as e:
+            logger.error("API request failed", exc_info=True)
+            return {"error": f"API request failed: {str(e)}"}
 
 def get_table_df(table_name):
     try:
@@ -102,7 +110,7 @@ def main():
     st.title("📚 Elementary School Book Recommender")
     
     # Create tabs for different sections
-    tab1, tab2, tab3 = st.tabs(["📖 Book Recommendations", "�� System Metrics", "🗄️ Database Explorer"])
+    tab1, tab2, tab3 = st.tabs(["📖 Book Recommendations", "📊 System Metrics", "🗄️ Database Explorer"])
     
     with tab1:
         st.header("📖 Book Recommendations")
