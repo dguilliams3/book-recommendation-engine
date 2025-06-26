@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from common import SettingsInstance as S
 from common.structured_logging import get_logger
 from recommendation_api.tools import readability_formula_estimator
+from common.events import BookUpdatedEvent, BOOK_EVENTS_TOPIC
+from common.kafka_utils import event_producer as ep
 
 logger = get_logger(__name__)
 
@@ -182,6 +184,13 @@ async def main():
                 enriched_count += 1
                 logger.debug("Database updated successfully", extra={"book_id": book_id})
                 
+                # Publish BookUpdated event
+                try:
+                    upd_evt = BookUpdatedEvent(book_id=book_id, payload={"page_count": page, "publication_year": year})
+                    await ep.publish_event(BOOK_EVENTS_TOPIC, upd_evt.dict())
+                except Exception:
+                    logger.warning("Failed to publish book updated event", extra={"book_id": book_id})
+            
             except Exception as e:
                 logger.error("Failed to update database", exc_info=True, extra={"book_id": book_id})
             

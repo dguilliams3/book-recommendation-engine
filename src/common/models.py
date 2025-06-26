@@ -1,22 +1,24 @@
 from typing import List, Optional
 from datetime import date
-from pydantic import BaseModel, Field, conint
-from pydantic import validator
+from pydantic import BaseModel, Field, conint, field_validator, ConfigDict
 
 class BookCatalogItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     book_id: str
     isbn: str | None = None
     title: str
-    genre: List[str] | str | None = None
-    keywords: List[str] | str | None = None
+    genre: List[str] = Field(default_factory=list)
+    keywords: List[str] = Field(default_factory=list)
     description: Optional[str] = None
     page_count: Optional[int] = None
     publication_year: Optional[int] = None
     difficulty_band: Optional[str] = None
+    reading_level: Optional[float] = Field(None, ge=0.0, le=12.0)
     average_student_rating: Optional[float] = Field(None, ge=0.0, le=5.0)
 
     # validators ------------------------------------------------------
-    @validator("genre", pre=True)
+    @field_validator("genre", mode="before")
     def _ensure_list_genre(cls, v):
         if v is None:
             return []
@@ -28,7 +30,7 @@ class BookCatalogItem(BaseModel):
                 return [v]
         return v
 
-    @validator("keywords", pre=True)
+    @field_validator("keywords", mode="before")
     def _ensure_list_keywords(cls, v):
         if v is None:
             return []

@@ -1,0 +1,26 @@
+# Python
+venv/
+
+# Tests
+tests/
+tests_data/
+.pytest_cache/
+.coverage
+.coverage.*
+.coverage.xml
+.coverage.json
+.coverage.yaml
+.coverage.yml
+.coverage.json
+
+# Cache files
+*.pycache/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.pyzwz
+

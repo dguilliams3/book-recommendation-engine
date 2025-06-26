@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: 'book_engine'
+    static_configs:
+      - targets:
+          - ingestion_service:9000
+          - recommendation_api:9000
+          - metrics_consumer:9000
+          - log_consumer:9000
+          - graph_refresher:9000
+          - book_vector_worker:9000
+          - student_profile_worker:9000
+          - student_embedding_worker:9000
+          - similarity_worker:9000
+          - book_enrichment_worker:9000 

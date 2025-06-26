@@ -11,7 +11,7 @@ Exposes:
 All tools are **read-only** w.r.t. external world and safe for parallel calls.
 """
 
-import asyncio, asyncpg
+import asyncio, asyncpg, sys, logging
 from pathlib import Path
 from typing import List
 
@@ -26,7 +26,6 @@ from recommendation_api.tools import (
     fetch_google_books_meta,
     fetch_open_library_meta,
     readability_formula_estimator,
-    compute_student_reading_level,
 )
 
 # --------------------------------------------------------------------- #
@@ -36,19 +35,48 @@ logger = get_logger(__name__)
 
 # vector store
 emb = OpenAIEmbeddings(api_key=S.openai_api_key, model=S.embedding_model)
+# Vector store cache and load failure tracking
 vec_store = None
+# Timestamp of the most-recent failed load attempt (epoch seconds). None until first failure.
+_last_failed_load: float | None = None
+# Cool-down (in seconds) before we attempt to load the FAISS index again after a failure.
+_LOAD_RETRY_INTERVAL_SEC = 60  # 1 minute – adjust via env var later if needed.
 
 def _store():
-    global vec_store
-    if vec_store is None:
-        logger.info("Loading FAISS vector store")
-        try:
-            vec_store = FAISS.load_local(Path(S.data_dir) / "vector_store", emb, allow_dangerous_deserialization=True)
-            logger.info("FAISS vector store loaded successfully")
-        except Exception as e:
-            logger.error("Failed to load FAISS vector store", exc_info=True)
-            raise
-    return vec_store
+    """Return the cached FAISS store.
+
+    To avoid hammering the filesystem (or spamming logs) if the index is
+    missing/corrupt, we back-off after a failure for a short interval.
+    """
+    global vec_store, _last_failed_load
+
+    # Short-circuit if we've already cached the store.
+    if vec_store is not None:
+        return vec_store
+
+    # Respect cool-down after a previous failure.
+    import time
+    if _last_failed_load and time.time() - _last_failed_load < _LOAD_RETRY_INTERVAL_SEC:
+        # Quickly raise rather than re-attempting disk I/O.
+        raise RuntimeError(
+            "Vector store unavailable – last load failure still within cool-down window"
+        )
+
+    logger.info("Loading FAISS vector store")
+    try:
+        vec_store = FAISS.load_local(
+            Path(S.data_dir) / "vector_store", emb, allow_dangerous_deserialization=True
+        )
+        logger.info("FAISS vector store loaded successfully")
+        return vec_store
+
+    except Exception:
+        # Record failure timestamp and propagate.
+        import time as _time
+
+        _last_failed_load = _time.time()
+        logger.error("Failed to load FAISS vector store", exc_info=True)
+        raise
 
 # pg connection pool (lazy)
 _pg_pool: asyncpg.Pool | None = None
@@ -290,8 +318,16 @@ async def get_book_recommendations_for_group(student_ids: List[str], n: int = 3)
 if __name__ == "__main__":           # pragma: no cover
     logger.info("Starting MCP book server")
     try:
+        # Ensure logger does not write to stdout (stdin/stdout used by FastMCP JSON-RPC)
+        for h in list(logger.handlers):
+            if isinstance(h, logging.StreamHandler):
+                h.stream = sys.stderr
         mcp.run(transport="stdio") 
         logger.info("MCP book server completed successfully")
     except Exception as e:
         logger.error("MCP book server failed", exc_info=True)
         raise 
+
+# compute_student_reading_level deprecated – keep stub for legacy paths
+def compute_student_reading_level(_rows):
+    return [] 
