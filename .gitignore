@@ -3,4 +3,17 @@ venv/
 EXAMPLES USING MCP AND LANGCHAIN REACT/
 development_scripts/
 data/
-__pycache__/
+
+# Caching and bytecode
+*/__pycache__/*
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.pyzwz
+
+# Heavy Data
+data/vector_store/
