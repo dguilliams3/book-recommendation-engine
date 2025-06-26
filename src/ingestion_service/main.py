@@ -4,7 +4,7 @@
 3. Upsert rows into Postgres and build / update FAISS embeddings.
 """
 
-import asyncio, sys
+import asyncio, sys, time
 from pathlib import Path
 from typing import Iterable
 
@@ -24,6 +24,7 @@ from common.events import (BookAddedEvent, BOOK_EVENTS_TOPIC, StudentAddedEvent,
                             StudentUpdatedEvent, CheckoutAddedEvent, STUDENT_EVENTS_TOPIC,
                             CHECKOUT_EVENTS_TOPIC)
 from .pipeline import run_ingestion
+from common.metrics import JOB_RUNS_TOTAL, JOB_DURATION_SECONDS
 
 logger = get_logger(__name__)
 TOPIC = "ingestion_metrics"
@@ -48,9 +49,25 @@ async def _publish(payload):  # fire-and-forget
         logger.error("Failed to publish metric", exc_info=True, extra={"payload": payload})
 
 def ingest():
-    """Thin wrapper that delegates to :func:`pipeline.run_ingestion`."""
+    """Run the ingestion pipeline and emit Prometheus job metrics."""
+    job_name = "ingestion_service"
+    start = time.perf_counter()
+
+    JOB_RUNS_TOTAL.labels(job=job_name, status="started").inc()
     logger.info("Starting ingestion service")
-    asyncio.run(run_ingestion())
+
+    try:
+        asyncio.run(run_ingestion())
+        JOB_RUNS_TOTAL.labels(job=job_name, status="success").inc()
+        JOB_DURATION_SECONDS.labels(job=job_name, status="success").observe(
+            time.perf_counter() - start
+        )
+    except Exception:
+        JOB_RUNS_TOTAL.labels(job=job_name, status="failure").inc()
+        JOB_DURATION_SECONDS.labels(job=job_name, status="failure").observe(
+            time.perf_counter() - start
+        )
+        raise
 
 if __name__ == "__main__":
     try:

@@ -13,6 +13,24 @@ from .events import BOOK_EVENTS_TOPIC, GRAPH_EVENTS_TOPIC
 
 logger = logging.getLogger(__name__)
 
+# Prometheus metrics (optional)
+try:
+    from prometheus_client import Counter
+
+    _PROMETHEUS_AVAILABLE = True
+    MESSAGES_PUBLISHED_TOTAL = Counter(
+        "kafka_messages_published_total",
+        "Kafka messages published",
+        ["topic", "status"],
+    )
+    MESSAGES_CONSUMED_TOTAL = Counter(
+        "kafka_messages_consumed_total",
+        "Kafka messages consumed",
+        ["topic", "status"],
+    )
+except ImportError:
+    _PROMETHEUS_AVAILABLE = False
+
 
 class KafkaEventProducer:
     """Thread-safe Kafka producer for publishing events."""
@@ -41,12 +59,18 @@ class KafkaEventProducer:
             producer = await self._get_producer()
             await producer.send_and_wait(topic, event)
             logger.debug(f"Published event to {topic}", extra={"event": event})
+            if _PROMETHEUS_AVAILABLE:
+                MESSAGES_PUBLISHED_TOTAL.labels(topic=topic, status="success").inc()
             return True
         except KafkaError as e:
             logger.error(f"Failed to publish event to {topic}", exc_info=True, extra={"event": event})
+            if _PROMETHEUS_AVAILABLE:
+                MESSAGES_PUBLISHED_TOTAL.labels(topic=topic, status="failure").inc()
             return False
         except Exception as e:
             logger.error(f"Unexpected error publishing event to {topic}", exc_info=True, extra={"event": event})
+            if _PROMETHEUS_AVAILABLE:
+                MESSAGES_PUBLISHED_TOTAL.labels(topic=topic, status="error").inc()
             return False
     
     async def close(self):
@@ -88,8 +112,12 @@ class KafkaEventConsumer:
             async for message in self._consumer:
                 try:
                     await message_handler(message.value)
+                    if _PROMETHEUS_AVAILABLE:
+                        MESSAGES_CONSUMED_TOTAL.labels(topic=self.topic, status="success").inc()
                 except Exception as e:
                     logger.error(f"Error processing message from {self.topic}", exc_info=True)
+                    if _PROMETHEUS_AVAILABLE:
+                        MESSAGES_CONSUMED_TOTAL.labels(topic=self.topic, status="error").inc()
         except Exception as e:
             logger.error(f"Kafka consumer error for topic {self.topic}", exc_info=True)
         finally:

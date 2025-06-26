@@ -25,6 +25,7 @@ except ImportError:  # optional dependency
 
 __all__ = [
     "get_reading_level",
+    "numeric_to_grade_text",
 ]
 
 _GOOGLE_API_KEY = os.getenv("GOOGLE_BOOKS_KEY")
@@ -118,41 +119,41 @@ async def _llm_estimate(title: str, *, model: str = "gpt-4o-mini") -> Optional[T
 # Public orchestrator                                                          #
 # --------------------------------------------------------------------------- #
 
-async def get_reading_level(
-    *,
-    isbn: str | None,
-    title: str,
-    blurb: str | None = None,
-    min_words_blurb: int = 100,
-) -> tuple[Optional[float], str]:
-    """Return (reading_level, source_tag).
+async def get_reading_level(*_args, **_kwargs):
+    """Deprecated stub: returns (None, 'deprecated').
 
-    Source tag values:
-    • google_preview
-    • openlib_desc
-    • blurb_fkgl
-    • gpt_estimate
-    • unknown
+    The system now expects `reading_level` to be provided in the source CSV
+    instead of calling external services.  This stub avoids import-time
+    explosions in any legacy code paths that might still import it.
     """
-    # Step 1 – Google Books preview
-    if isbn:
-        preview = await _fetch_google_preview(isbn)
-        if preview:
-            return _fkgl(preview), "google_preview"
+    return None, "deprecated"
 
-    # Step 2 – Open Library description
-    if isbn:
-        desc = await _fetch_openlib_description(isbn)
-        if desc:
-            return _fkgl(desc), "openlib_desc"
 
-    # Step 3 – local blurb
-    if blurb and len(blurb.split()) >= min_words_blurb:
-        return _fkgl(blurb), "blurb_fkgl"
+# --------------------------------------------------------------------------- #
+# Grade label mapping                                                          #
+# --------------------------------------------------------------------------- #
 
-    # Step 4 – LLM fallback
-    est = await _llm_estimate(title)
-    if est and est[1] >= 0.7:
-        return est[0], "gpt_estimate"
+def numeric_to_grade_text(level: float | int | None) -> str | None:
+    """Convert a numeric grade level (e.g., 4.0) into human label ("4th grade").
 
-    return None, "unknown" 
+    Kindergarten is returned for values <1.  Returns ``None`` if *level* is
+    ``None`` or negative.
+    """
+    if level is None or level < 0:
+        return None
+
+    if level < 1:
+        return "Kindergarten"
+    # Round to nearest whole grade for label purposes
+    grade = int(round(float(level)))
+    if grade <= 0:
+        return "Kindergarten"
+    if grade == 1:
+        suffix = "st"
+    elif grade == 2:
+        suffix = "nd"
+    elif grade == 3:
+        suffix = "rd"
+    else:
+        suffix = "th"
+    return f"{grade}{suffix} grade" 

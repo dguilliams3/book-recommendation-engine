@@ -26,7 +26,6 @@ from recommendation_api.tools import (
     fetch_google_books_meta,
     fetch_open_library_meta,
     readability_formula_estimator,
-    compute_student_reading_level,
 )
 
 # --------------------------------------------------------------------- #
@@ -328,3 +327,7 @@ if __name__ == "__main__":           # pragma: no cover
     except Exception as e:
         logger.error("MCP book server failed", exc_info=True)
         raise 
+
+# compute_student_reading_level deprecated – keep stub for legacy paths
+def compute_student_reading_level(_rows):
+    return [] 

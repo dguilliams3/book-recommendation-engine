@@ -1,9 +1,9 @@
 import asyncio, json, os, uuid, time, sys
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from starlette.responses import JSONResponse
 from mcp import StdioServerParameters, stdio_client, ClientSession
 from common import SettingsInstance as S
-from common.structured_logging import get_logger
+from common.structured_logging import get_logger, SERVICE_NAME
 from langchain.prompts import ChatPromptTemplate
 from sqlalchemy.ext.asyncio import create_async_engine
 from . import db_models
@@ -23,6 +23,7 @@ from .service import (
     RecommendResponse,
     generate_recommendations,
 )
+from common.metrics import REQUEST_COUNTER, REQUEST_LATENCY
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -196,6 +197,31 @@ class MetricCallbackHandler(AsyncCallbackHandler):
 
     async def on_tool_error(self, error, **kwargs):  # type: ignore[override]
         self.error_count += 1 
+
+# ---------------------------------------------------------------------------
+# Prometheus middleware (lightweight – no external deps beyond prometheus_client)
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def _prometheus_middleware(request: Request, call_next):  # noqa: D401
+    """Track per-request latency and count using Prometheus helpers."""
+
+    start_time = time.perf_counter()
+    response = await call_next(request)
+
+    duration = time.perf_counter() - start_time
+    endpoint = request.url.path
+
+    # Record metrics (labels are no-ops if Prometheus disabled)
+    REQUEST_LATENCY.labels(service=SERVICE_NAME, endpoint=endpoint).observe(duration)
+    REQUEST_COUNTER.labels(
+        service=SERVICE_NAME,
+        method=request.method,
+        endpoint=endpoint,
+        status_code=response.status_code,
+    ).inc()
+
+    return response
 
 # ---------------------------------------------------------------------------
 # Script entry-point (mirrors pattern from main_security_agent_server.py)

@@ -288,5 +288,18 @@ services:
     deploy:
       replicas: ${ENABLE_IMAGE}
 
+# ---------------- Monitoring stack -------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    platform: linux/amd64
+    container_name: prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
 volumes:
   pgdata: 

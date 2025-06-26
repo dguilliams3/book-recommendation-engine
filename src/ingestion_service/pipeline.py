@@ -25,13 +25,13 @@ from common.events import (
     CheckoutAddedEvent,
     STUDENT_EVENTS_TOPIC,
     CHECKOUT_EVENTS_TOPIC,
+    StudentsAddedEvent,
 )
-from recommendation_api.tools.readability_formula_estimator import (
-    readability_formula_estimator,
-)
+from common.reading_level_utils import numeric_to_grade_text
 
 from .csv_utils import _load_csv
 from .db_utils import _bootstrap_schema
+from embedding.book import BookFlattener
 
 logger = get_logger(__name__)
 TOPIC = "ingestion_metrics"
@@ -66,8 +66,11 @@ async def run_ingestion():
 
     # Database engine ---------------------------------------------------------
     db_url_str = str(S.db_url)
+    # Ensure we have an asyncpg driver URL for SQLAlchemy
     if db_url_str.startswith("postgresql://"):
         async_db_url = db_url_str.replace("postgresql://", "postgresql+asyncpg://")
+    elif db_url_str.startswith("postgresql+psycopg2://"):
+        async_db_url = db_url_str.replace("postgresql+psycopg2://", "postgresql+asyncpg://")
     else:
         async_db_url = db_url_str
 
@@ -80,6 +83,7 @@ async def run_ingestion():
         # -------- books ------------------------------------------------------
         book_texts: list[str] = []
         book_metadatas: list[dict] = []
+        flattener = BookFlattener()
         book_count = 0
         for row in _load_csv(Path("data/catalog_sample.csv")):
             try:
@@ -104,9 +108,14 @@ async def run_ingestion():
                     except ValueError:
                         logger.warning("Bad reading_level value; estimating", extra={"value": row["reading_level"]})
                 if rl is None:
-                    rl = readability_formula_estimator(row.get("description", "")).get("average_grade_level")
+                    # readability_formula_estimator removed – reading level now supplied via CSV
+                    pass
 
-                item = models.BookCatalogItem(**row, reading_level=rl)
+                # Remove original reading_level to avoid duplicate kwarg
+                row_clean = row.copy()
+                row_clean.pop("reading_level", None)
+
+                item = models.BookCatalogItem(**row_clean, reading_level=rl)
 
                 await sess.execute(
                     text(
@@ -138,8 +147,9 @@ async def run_ingestion():
                     },
                 )
 
-                book_texts.append(f"{item.title}. {item.description or ''}")
-                book_metadatas.append({"book_id": item.book_id, "reading_level": rl})
+                doc_text, meta = flattener(row | {"reading_level": rl, "book_id": item.book_id})
+                book_texts.append(doc_text)
+                book_metadatas.append(meta)
                 book_count += 1
             except Exception:
                 logger.error("Failed to process book row", exc_info=True)
@@ -183,7 +193,8 @@ async def run_ingestion():
 
         if student_count:
             await event_producer.publish_event(
-                STUDENT_EVENTS_TOPIC, StudentAddedEvent(count=student_count).dict()
+                STUDENT_EVENTS_TOPIC,
+                StudentsAddedEvent(count=student_count).model_dump(),
             )
 
         # -------- checkouts --------------------------------------------------

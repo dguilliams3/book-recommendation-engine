@@ -97,7 +97,11 @@ async def main():
     
     # Connect to database
     logger.info("Connecting to database")
-    pg_url = str(S.db_url).replace("postgresql+asyncpg://", "postgresql://")
+    pg_url = str(S.db_url)
+    if pg_url.startswith("postgresql+asyncpg://"):
+        pg_url = pg_url.replace("postgresql+asyncpg://", "postgresql://")
+    elif pg_url.startswith("postgresql+psycopg2://"):
+        pg_url = pg_url.replace("postgresql+psycopg2://", "postgresql://")
     try:
         conn = await asyncpg.connect(pg_url)
         logger.info("Database connection established")

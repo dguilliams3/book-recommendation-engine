@@ -1,31 +1,31 @@
 from pathlib import Path
-from pydantic_settings import BaseSettings
-from pydantic import Field, AnyUrl, ConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, AnyUrl
 
 class Settings(BaseSettings):
-    model_config = ConfigDict(env_file=".env", extra="allow")
+    model_config = SettingsConfigDict(env_file=".env", extra="allow")
     
     # --- core -----------------------------------------------------------
     project_name: str = "Elementary‑Books‑AI"
     data_dir: Path = Path("data")          # relative path for local development
-    model_name: str = Field("gpt-4o-mini", env="OPENAI_MODEL")
-    embedding_model: str = Field("text-embedding-3-small", env="EMBEDDING_MODEL")
-    openai_api_key: str = Field(..., env="OPENAI_API_KEY")
-    vector_store_type: str = Field("faiss", env="VECTOR_STORE_TYPE")   # faiss|chroma|pinecone
+    model_name: str = Field("gpt-4o-mini", validation_alias="OPENAI_MODEL")
+    embedding_model: str = Field("text-embedding-3-small", validation_alias="EMBEDDING_MODEL")
+    openai_api_key: str = Field(..., validation_alias="OPENAI_API_KEY")
+    vector_store_type: str = Field("faiss", validation_alias="VECTOR_STORE_TYPE")   # faiss|chroma|pinecone
     
     # Database configuration with flexible host
-    db_host: str = Field("postgres", env="DB_HOST")  # postgres (Docker) or localhost (local)
-    db_port: int = Field(5432, env="DB_PORT")
-    db_user: str = Field("books", env="DB_USER")
-    db_password: str = Field("books", env="DB_PASSWORD")
-    db_name: str = Field("books", env="DB_NAME")
+    db_host: str = Field("postgres", validation_alias="DB_HOST")  # postgres (Docker) or localhost (local)
+    db_port: int = Field(5432, validation_alias="DB_PORT")
+    db_user: str = Field("books", validation_alias="DB_USER")
+    db_password: str = Field("books", validation_alias="DB_PASSWORD")
+    db_name: str = Field("books", validation_alias="DB_NAME")
     
     # Legacy DB_URL support (for backward compatibility)
-    legacy_db_url: AnyUrl | None = Field(None, env="DB_URL")
+    legacy_db_url: AnyUrl | None = Field(None, validation_alias="DB_URL")
     
     # Kafka configuration with flexible host
-    kafka_host: str = Field("kafka", env="KAFKA_HOST")  # kafka (Docker) or localhost (local)
-    kafka_port: int = Field(9092, env="KAFKA_PORT")
+    kafka_host: str = Field("kafka", validation_alias="KAFKA_HOST")  # kafka (Docker) or localhost (local)
+    kafka_port: int = Field(9092, validation_alias="KAFKA_PORT")
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -52,14 +52,14 @@ class Settings(BaseSettings):
         return self._kafka_bootstrap
     
     # Legacy KAFKA_BROKERS support (for backward compatibility)
-    legacy_kafka_bootstrap: str | None = Field(None, env="KAFKA_BROKERS")
+    legacy_kafka_bootstrap: str | None = Field(None, validation_alias="KAFKA_BROKERS")
     
-    google_books_api_key: str | None = Field(None, env="GOOGLE_BOOKS_KEY")
-    openai_request_timeout: int = Field(20, env="OPENAI_TIMEOUT")
+    google_books_api_key: str | None = Field(None, validation_alias="GOOGLE_BOOKS_KEY")
+    openai_request_timeout: int = Field(20, validation_alias="OPENAI_TIMEOUT")
 
     # batch parameters
-    similarity_threshold: float = Field(0.75, env="SIMILARITY_THRESHOLD")
-    half_life_days: int = Field(45, env="HALF_LIFE_DAYS")
+    similarity_threshold: float = Field(0.75, validation_alias="SIMILARITY_THRESHOLD")
+    half_life_days: int = Field(45, validation_alias="HALF_LIFE_DAYS")
 
     # service ports (overridable) ---------------------------------------
     ingestion_port: int = 8001
@@ -68,8 +68,8 @@ class Settings(BaseSettings):
     metrics_consumer_port: int = 8003
 
     # env flags for optional workers ------------------------------------
-    enable_tts: bool = Field(False, env="ENABLE_TTS")
-    enable_image: bool = Field(False, env="ENABLE_IMAGE")
+    enable_tts: bool = Field(False, validation_alias="ENABLE_TTS")
+    enable_image: bool = Field(False, validation_alias="ENABLE_IMAGE")
 
 # singleton
 SettingsInstance = Settings()
