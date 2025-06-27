@@ -16,7 +16,7 @@ RUN pip install schedule
 
 # Copy application code
 COPY src/graph_refresher/ .
-COPY src/common/ ./common/
+COPY src/common/ /app/common/
 
 # Create a Python scheduler script
 RUN echo '#!/usr/bin/env python3\n\

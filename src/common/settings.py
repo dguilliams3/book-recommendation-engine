@@ -1,6 +1,7 @@
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, AnyUrl
+import os
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="allow")
@@ -8,9 +9,9 @@ class Settings(BaseSettings):
     # --- core -----------------------------------------------------------
     project_name: str = "Elementary‑Books‑AI"
     data_dir: Path = Path("data")          # relative path for local development
-    model_name: str = Field("gpt-4o-mini", validation_alias="OPENAI_MODEL")
+    model_name: str = Field(os.getenv("MODEL_NAME", "gpt-4o-mini"), validation_alias="OPENAI_MODEL")
     embedding_model: str = Field("text-embedding-3-small", validation_alias="EMBEDDING_MODEL")
-    openai_api_key: str = Field(..., validation_alias="OPENAI_API_KEY")
+    openai_api_key: str = Field(os.getenv("OPENAI_KEY", ""), validation_alias="OPENAI_API_KEY")
     vector_store_type: str = Field("faiss", validation_alias="VECTOR_STORE_TYPE")   # faiss|chroma|pinecone
     
     # Database configuration with flexible host
@@ -56,6 +57,11 @@ class Settings(BaseSettings):
     
     google_books_api_key: str | None = Field(None, validation_alias="GOOGLE_BOOKS_KEY")
     openai_request_timeout: int = Field(20, validation_alias="OPENAI_TIMEOUT")
+    # LLM call budget
+    max_tokens: int = Field(600, validation_alias="MAX_TOKENS_PER_CALL")
+
+    # Redis (optional) - use redis:6379 for Docker, localhost:6379 for local
+    redis_url: str = Field(os.getenv("REDIS_URL", "redis://redis:6379/0"), validation_alias="REDIS_URL")
 
     # batch parameters
     similarity_threshold: float = Field(0.75, validation_alias="SIMILARITY_THRESHOLD")
@@ -70,6 +76,12 @@ class Settings(BaseSettings):
     # env flags for optional workers ------------------------------------
     enable_tts: bool = Field(False, validation_alias="ENABLE_TTS")
     enable_image: bool = Field(False, validation_alias="ENABLE_IMAGE")
+
+    # Additional optional config values
+    model_max_tokens: int = Field(int(os.getenv("MODEL_MAX_TOKENS", "600")))
+
+    # Path to weights.json (relative or absolute)
+    weights_path: str = Field(os.getenv("WEIGHTS_PATH", "src/recommendation_api/weights.json"))
 
 # singleton
 SettingsInstance = Settings()

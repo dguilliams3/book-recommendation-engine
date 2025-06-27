@@ -16,7 +16,7 @@ RUN pip install schedule
 
 # Copy application code
 COPY src/book_enrichment_worker/ .
-COPY src/common/ ./common/
+COPY src/common/ /app/common/
 COPY src/recommendation_api/tools /app/recommendation_api/tools
 
 # Create a Python scheduler script
