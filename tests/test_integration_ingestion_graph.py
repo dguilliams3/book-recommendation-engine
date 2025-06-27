@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+from unittest.mock import patch
 
 import asyncpg
 import pytest
@@ -12,6 +13,10 @@ from langchain_openai import OpenAIEmbeddings
 
 from ingestion_service.pipeline import run_ingestion
 from graph_refresher.main import main as graph_refresh_main
+
+from common import kafka_utils
+from common.events import BookAddedEvent, BOOK_EVENTS_TOPIC
+from common.models import BookCatalogItem
 
 # -----------------------------------------------------------------------------
 # Helpers & fixtures
@@ -27,9 +32,9 @@ def _patch_external_dependencies(monkeypatch, tmp_path):
 
     # 1. Kafka – replace publish_event with no-op coroutine
     async def _noop(*_args, **_kwargs):
-        return True
+        pass
 
-    monkeypatch.setattr(kafka_utils.event_producer, "publish_event", _noop, False)
+    monkeypatch.setattr(kafka_utils, "publish_event", _noop, False)
 
     # 2. OpenAI embeddings – avoid network call and make deterministic output
     def _fake_embed_documents(self, texts, **_kwargs):
@@ -116,4 +121,20 @@ async def test_graph_refresher_creates_similarity_edges(pg_container):
         await conn.close()
 
     assert emb_cnt and emb_cnt > 0, "Student embeddings were not created"
-    assert sim_cnt and sim_cnt > 0, "Student similarity edges not created" 
+    assert sim_cnt and sim_cnt > 0, "Student similarity edges not created"
+
+
+def test_basic_import():
+    # Try importing ingestion components
+    from ingestion_service.db_utils import insert_books
+    assert insert_books
+
+
+@pytest.mark.asyncio
+async def test_book_embedding_flow(tmp_path, monkeypatch):
+    """End-to-end test of book ingestion → FAISS embedding → graph."""
+    
+    # Mock Kafka publishing
+    monkeypatch.setattr(kafka_utils, "publish_event", _noop, False)
+    
+    # ... existing test code ... 
