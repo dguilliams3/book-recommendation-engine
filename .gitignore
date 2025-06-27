@@ -2,10 +2,11 @@ venv/
 .env
 EXAMPLES USING MCP AND LANGCHAIN REACT/
 development_scripts/
-data/
+data/vector_store/*
 
 # Caching and bytecode
 */__pycache__/*
+__pycache__/
 *.pyc
 *.pyo
 *.pyd
