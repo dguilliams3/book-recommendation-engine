@@ -1,4 +1,16 @@
 services:
+  # Redis cache for deduplication and caching recommendation history
+  redis:
+    image: redis:7-alpine
+    platform: linux/amd64
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   # PostgreSQL database with pgvector extension storing catalog, student, and checkout data for the entire system.
   postgres:
     image: ankane/pgvector:latest
@@ -107,6 +119,8 @@ services:
     depends_on:
       ingestion_service:
         condition: service_started
+      redis:
+        condition: service_healthy
 
 
 # Streamlit dashboard that teachers and students use to search the catalog and receive recommendations.
@@ -118,6 +132,8 @@ services:
     container_name: streamlit_ui
     env_file:
       - .env
+    volumes:
+      - ./data:/app/data
     ports:
       - "8501:8501"
     depends_on: [recommendation_api]
@@ -295,11 +311,31 @@ services:
     container_name: prometheus
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
     ports:
       - "9090:9090"
     depends_on:
       kafka:
         condition: service_healthy
 
+  # Grafana for visualization and dashboards
+  grafana:
+    image: grafana/grafana:latest
+    platform: linux/amd64
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
 volumes:
+  # Database persistence (essential for demo session)
   pgdata: 
+  
+  # Monitoring stack (useful for showing metrics during demo)
+  prometheus_data:
+  grafana_data:

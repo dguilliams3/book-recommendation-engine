@@ -21,7 +21,7 @@ import aiokafka, asyncpg
 from langchain_openai import OpenAIEmbeddings
 from common import SettingsInstance as S
 from common.structured_logging import get_logger
-from common.kafka_utils import KafkaEventConsumer, event_producer
+from common.kafka_utils import KafkaEventConsumer, publish_event
 from common.events import BOOK_EVENTS_TOPIC
 
 logger = get_logger(__name__)
@@ -91,6 +91,27 @@ async def fetch_events(conn):
         logger.error("Failed to fetch checkout events", exc_info=True)
         raise
 
+async def _wait_for_data(timeout_sec: int = 60):
+    """Poll the checkout table until we have at least one row or timeout."""
+    start = time.perf_counter()
+    pg_url = str(S.db_url)
+    if pg_url.startswith("postgresql+asyncpg://"):
+        pg_url = pg_url.replace("postgresql+asyncpg://", "postgresql://")
+    while time.perf_counter() - start < timeout_sec:
+        try:
+            conn = await asyncpg.connect(pg_url)
+            cnt = await conn.fetchval("SELECT COUNT(*) FROM checkout")
+            await conn.close()
+            if cnt and cnt > 0:
+                logger.info("Checkout data detected", extra={"rows": cnt})
+                return True
+            logger.info("Waiting for checkout data…", extra={"elapsed_sec": round(time.perf_counter()-start,1)})
+        except Exception:
+            logger.debug("Checkout poll failed, retrying", exc_info=True)
+        await asyncio.sleep(5)
+    logger.warning("Timeout waiting for checkout data – proceeding anyway")
+    return False
+
 async def main():
     logger.info("Starting graph refresh process")
     t0 = time.perf_counter()
@@ -109,6 +130,9 @@ async def main():
         logger.error("Failed to connect to database", exc_info=True)
         raise
     
+    # Wait until ingestion has populated checkout data
+    await _wait_for_data()
+
     # Fetch events
     rows = await fetch_events(conn)
 
@@ -153,19 +177,58 @@ async def main():
             "vector_count": len(vectors),
             "vector_dimension": len(vectors[0]) if vectors else 0
         })
+        # Debug: Check what vectors actually contains
+        logger.info("Debug vectors info", extra={
+            "vectors_type": type(vectors).__name__,
+            "vectors_truthy": bool(vectors),
+            "vectors_length": len(vectors) if vectors else "N/A",
+            "first_vector_length": len(vectors[0]) if vectors and len(vectors) > 0 else "N/A"
+        })
     except Exception as e:
         logger.error("Failed to generate embeddings", exc_info=True)
         raise
 
-    # Setup vector extension and table with correct dimension
+    # Always create the similarity table first (doesn't require vectors)
+    logger.info("Setting up similarity table")
+    try:
+        await conn.execute(
+            "CREATE TABLE IF NOT EXISTS student_similarity(a TEXT,b TEXT,sim REAL,PRIMARY KEY(a,b))"
+        )
+        await conn.execute("TRUNCATE student_similarity")
+        logger.info("Student similarity table prepared")
+    except Exception as e:
+        logger.error("Failed to prepare similarity table", exc_info=True)
+        raise
+
+    # Setup vector extension and table with correct dimension (only if we have vectors)
     logger.info("Setting up vector extension and table")
     try:
         await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        dim = len(vectors[0]) if vectors else 0
+        
+        # Debug: Check vectors right before the condition
+        logger.info("Debug before vectors check", extra={
+            "vectors_type": type(vectors).__name__,
+            "vectors_truthy": bool(vectors),
+            "vectors_length": len(vectors) if vectors else "N/A"
+        })
+        
+        if not vectors:
+            logger.warning("No embeddings generated, skipping vector operations but similarity table created")
+            await conn.close()
+            logger.info("Database connection closed")
+            return
+            
+        dim = len(vectors[0])
+        if dim <= 0:
+            logger.warning("Invalid embedding dimension, skipping vector operations")
+            await conn.close()
+            logger.info("Database connection closed")
+            return
+            
         # Drop table if exists with wrong dimension
         await conn.execute("DROP TABLE IF EXISTS student_embeddings")
         await conn.execute(
-            f"CREATE TABLE student_embeddings( student_id TEXT PRIMARY KEY, vec VECTOR({dim}) )"
+            f"CREATE TABLE student_embeddings( student_id TEXT PRIMARY KEY, vec VECTOR({dim}), last_event UUID )"
         )
         logger.info("Vector extension and table setup completed", extra={"dimension": dim})
     except Exception as e:
@@ -178,10 +241,10 @@ async def main():
         rows_to_insert = []
         for sid, vec in zip(keys, vectors):
             pg_vec = "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
-            rows_to_insert.append((sid, pg_vec))
+            rows_to_insert.append((sid, pg_vec, None))
 
         await conn.executemany(
-            "INSERT INTO student_embeddings VALUES($1,$2)"
+            "INSERT INTO student_embeddings VALUES($1,$2,$3)"
             "ON CONFLICT(student_id) DO UPDATE SET vec = EXCLUDED.vec",
             rows_to_insert,
         )
@@ -203,15 +266,6 @@ async def main():
 
     # Compute neighbours with pgvector operator
     logger.info("Computing student similarities")
-    try:
-        await conn.execute(
-            "CREATE TABLE IF NOT EXISTS student_similarity(a TEXT,b TEXT,sim REAL,PRIMARY KEY(a,b))"
-        )
-        await conn.execute("TRUNCATE student_similarity")
-        logger.info("Student similarity table prepared")
-    except Exception as e:
-        logger.error("Failed to prepare similarity table", exc_info=True)
-        raise
     
     insert_rows = []
     similarity_count = 0
@@ -274,7 +328,7 @@ async def main():
             "run_id": uuid.uuid4().hex,
         }
 
-        await event_producer.publish_event("graph_delta", metric_payload)
+        await publish_event("graph_delta", metric_payload)
         logger.info("Graph delta metrics published successfully", extra=metric_payload)
     except Exception:
         logger.error("Failed to publish graph delta metrics", exc_info=True)
@@ -295,6 +349,9 @@ if __name__ == "__main__":
             # Start event listener
             consumer = KafkaEventConsumer(BOOK_EVENTS_TOPIC, "graph_refresher")
             listener_task = asyncio.create_task(consumer.start(handle_book_event))
+            
+            # Wait until ingestion has populated checkout data
+            await _wait_for_data()
             
             # Run initial refresh
             try:

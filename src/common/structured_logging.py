@@ -89,12 +89,42 @@ def get_logger(name: str | None = None, kafka_producer: Optional["AIOKafkaProduc
         ch.setFormatter(formatter)
         logger.addHandler(ch)
 
-    # Kafka handler
-    if LOG_TO_KAFKA and kafka_producer and AIOKafkaProducer is not None:
-        if not any(isinstance(h, KafkaLogHandler) for h in logger.handlers):
-            kh = KafkaLogHandler(kafka_producer)
-            kh.setFormatter(KafkaJsonFormatter())
-            logger.addHandler(kh)
+    # ------------------------------------------------------------------
+    # Kafka handler – acquire a producer automatically if not supplied.
+    # This is best-effort: if Kafka is down or aiokafka is missing we
+    # simply skip the handler and continue with console logging.
+    # ------------------------------------------------------------------
+
+    if LOG_TO_KAFKA and AIOKafkaProducer is not None:
+        if kafka_producer is None:
+            # Try to obtain the shared producer from common.kafka_utils.
+            try:
+                import asyncio
+                from common.kafka_utils import get_event_producer  # lazy import
+
+                async def _obtain():  # noqa: D401
+                    try:
+                        producer = await get_event_producer()
+                        return await producer._get_producer()
+                    except Exception:  # pragma: no cover – swallow errors
+                        return None
+
+                if asyncio.get_event_loop().is_running():
+                    # Can't await in sync context; skip auto-producer.
+                    kafka_producer = None
+                else:
+                    kafka_producer = asyncio.run(_obtain())
+            except Exception:
+                kafka_producer = None
+
+        if kafka_producer and not any(isinstance(h, KafkaLogHandler) for h in logger.handlers):
+            try:
+                kh = KafkaLogHandler(kafka_producer)
+                kh.setFormatter(KafkaJsonFormatter())
+                logger.addHandler(kh)
+            except Exception:
+                # If handler setup fails we ignore and continue.
+                pass
 
     logger.propagate = False
 

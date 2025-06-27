@@ -1,4 +1,5 @@
 openai>=1.10.0
+numpy>=1.26.0
 langchain-openai
 aiokafka>=0.9.0
 pydantic>=2.5.0

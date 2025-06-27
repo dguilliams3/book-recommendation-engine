@@ -17,3 +17,4 @@ textstat>=0.7.3
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
 faiss-cpu
+redis>=5.0.0

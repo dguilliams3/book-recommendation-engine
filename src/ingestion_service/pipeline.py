@@ -17,7 +17,7 @@ from sqlalchemy import text
 from common.settings import SettingsInstance as S
 from common import models
 from common.structured_logging import get_logger
-from common.kafka_utils import event_producer
+from common.kafka_utils import publish_event
 from common.events import (
     BookAddedEvent,
     BOOK_EVENTS_TOPIC,
@@ -39,7 +39,7 @@ TOPIC = "ingestion_metrics"
 
 async def _publish(payload):  # fire-and-forget helper
     try:
-        await event_producer.publish_event(TOPIC, payload)
+        await publish_event(TOPIC, payload)
         logger.debug("Metric published", extra={"payload": payload})
     except Exception:
         logger.error("Failed to publish metric", exc_info=True)
@@ -119,10 +119,11 @@ async def run_ingestion():
 
                 await sess.execute(
                     text(
-                        """INSERT INTO catalog(book_id,isbn,title,genre,keywords,description,page_count,publication_year,difficulty_band,reading_level,average_student_rating)
-                            VALUES(:book_id,:isbn,:title,:genre,:keywords,:description,:page_count,:publication_year,:difficulty_band,:reading_level,:rating)
+                        """INSERT INTO catalog(book_id,isbn,title,author,genre,keywords,description,page_count,publication_year,difficulty_band,reading_level,average_student_rating)
+                            VALUES(:book_id,:isbn,:title,:author,:genre,:keywords,:description,:page_count,:publication_year,:difficulty_band,:reading_level,:average_student_rating)
                             ON CONFLICT(book_id) DO UPDATE SET
                                 isbn=EXCLUDED.isbn,
+                                author=EXCLUDED.author,
                                 genre=EXCLUDED.genre,
                                 keywords=EXCLUDED.keywords,
                                 description=EXCLUDED.description,
@@ -136,6 +137,7 @@ async def run_ingestion():
                         "book_id": item.book_id,
                         "isbn": item.isbn,
                         "title": item.title,
+                        "author": item.author,
                         "genre": json.dumps(item.genre),
                         "keywords": json.dumps(item.keywords),
                         "description": item.description,
@@ -143,7 +145,7 @@ async def run_ingestion():
                         "publication_year": item.publication_year,
                         "difficulty_band": item.difficulty_band,
                         "reading_level": rl,
-                        "rating": item.average_student_rating,
+                        "average_student_rating": item.average_student_rating,
                     },
                 )
 
@@ -157,7 +159,7 @@ async def run_ingestion():
 
         # Emit event
         if book_count:
-            await event_producer.publish_event(
+            await publish_event(
                 BOOK_EVENTS_TOPIC, BookAddedEvent(count=book_count, book_ids=[m["book_id"] for m in book_metadatas]).dict()
             )
 
@@ -167,6 +169,8 @@ async def run_ingestion():
         elif store is not None and book_texts:
             store.add_texts(book_texts, metadatas=book_metadatas)
 
+        # Proceed to checkout processing
+
         # -------- students ---------------------------------------------------
         student_count = 0
         for row in _load_csv(Path("data/students_sample.csv")):
@@ -174,7 +178,7 @@ async def run_ingestion():
                 stu = models.StudentRecord(**row)
                 await sess.execute(
                     text(
-                        "INSERT INTO students VALUES(:student_id,:grade,:age,:teacher,:score,:lunch)"
+                        "INSERT INTO students VALUES(:student_id,:grade,:age,:teacher,:score,:lunch) "
                         "ON CONFLICT(student_id) DO UPDATE SET grade_level=EXCLUDED.grade_level, age=EXCLUDED.age, homeroom_teacher=EXCLUDED.homeroom_teacher, prior_year_reading_score=EXCLUDED.prior_year_reading_score, lunch_period=EXCLUDED.lunch_period"
                     ),
                     {
@@ -183,7 +187,7 @@ async def run_ingestion():
                         "age": stu.age,
                         "teacher": stu.homeroom_teacher,
                         "score": stu.prior_year_reading_score,
-                        "lunch": stu.lunch_period,
+                        "lunch": str(stu.lunch_period),
                     },
                 )
                 student_count += 1
@@ -192,10 +196,14 @@ async def run_ingestion():
         logger.info("Students processed", extra={"count": student_count})
 
         if student_count:
-            await event_producer.publish_event(
+            await publish_event(
                 STUDENT_EVENTS_TOPIC,
                 StudentsAddedEvent(count=student_count).model_dump(),
             )
+
+        # Commit books and students before processing checkouts so that FK constraints are satisfied even if checkouts fail
+        await sess.commit()
+        logger.info("Books and students committed", extra={"books": book_count, "students": student_count})
 
         # -------- checkouts --------------------------------------------------
         checkout_count = 0
@@ -204,8 +212,8 @@ async def run_ingestion():
                 chk = models.CheckoutRecord(**row)
                 await sess.execute(
                     text(
-                        "INSERT INTO checkout VALUES(:sid,:bid,:out,:back,:rating)"
-                        "ON CONFLICT (student_id, book_id, checkout_date) DO UPDATE SET return_date=EXCLUDED.return_date, student_rating=EXCLUDED.student_rating"
+                        "INSERT INTO checkout (student_id, book_id, checkout_date, return_date, student_rating, checkout_id) VALUES(:sid,:bid,:out,:back,:rating,:checkout_id) "
+                        "ON CONFLICT (student_id, book_id, checkout_date) DO UPDATE SET return_date=EXCLUDED.return_date, student_rating=EXCLUDED.student_rating, checkout_id=EXCLUDED.checkout_id"
                     ),
                     {
                         "sid": chk.student_id,
@@ -213,11 +221,12 @@ async def run_ingestion():
                         "out": chk.checkout_date,
                         "back": chk.return_date,
                         "rating": chk.student_rating,
+                        "checkout_id": chk.checkout_id,
                     },
                 )
                 checkout_count += 1
 
-                await event_producer.publish_event(
+                await publish_event(
                     CHECKOUT_EVENTS_TOPIC,
                     CheckoutAddedEvent(student_id=chk.student_id, book_id=chk.book_id, checkout_date=str(chk.checkout_date)).dict(),
                 )
@@ -236,14 +245,12 @@ async def run_ingestion():
         {
             "event": "ingestion_complete",
             "duration": duration,
-            "rows_ingested": store.index.ntotal if store else 0,
-            "request_id": uuid.uuid4().hex,
-            "timestamp": time.time(),
-            "books_processed": book_count,
-            "students_processed": student_count,
-            "checkouts_processed": checkout_count,
+            "books_ingested": book_count,
+            "students_ingested": student_count,
+            "checkouts_ingested": checkout_count,
+            "faiss_index_updated": book_texts is not None and len(book_texts) > 0,
         }
     )
 
-    await event_producer.close()
+    # Producer cleanup now handled automatically per event loop
     logger.info("Ingestion finished", extra={"duration_sec": duration}) 

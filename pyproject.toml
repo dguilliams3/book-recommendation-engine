@@ -10,7 +10,7 @@ authors = [
     {name = "Dan Guilliams",email = "dan.guilliams@danguilliams.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<4.0"
 dependencies = [
     "fastapi",
     "uvicorn[standard]",
@@ -37,6 +37,7 @@ dependencies = [
     "requests>=2.31.0",
     "typer",
     "rich",
+    "nest-asyncio (>=1.6.0,<2.0.0)",
 ]
 
 [project.scripts]
@@ -47,3 +48,18 @@ where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+
+[tool.poetry.group.test.dependencies]
+testcontainers = {extras = ["postgres"], version = "^4.10.0"}
+
+[project.optional-dependencies]
+test = [
+  "pytest>=7.4",
+  "pytest-asyncio>=0.23",
+  "pytest-cov>=4.1",
+  "testcontainers[postgres]>=3.7.0",
+]
+
+[tool.pytest.ini_options]
+addopts = "--cov=src --cov-report=term-missing -q"

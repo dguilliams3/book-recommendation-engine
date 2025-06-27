@@ -92,4 +92,14 @@ GRAPH_EVENTS_TOPIC = "graph_events"
 STUDENT_EVENTS_TOPIC = "student_events"
 CHECKOUT_EVENTS_TOPIC = "checkout_events"
 STUDENT_PROFILE_TOPIC = "student_profile_events"
-STUDENT_EMBEDDING_TOPIC = "student_embedding_events" 
+STUDENT_EMBEDDING_TOPIC = "student_embedding_events"
+BOOK_ENRICHMENT_TASKS_TOPIC = "book_enrichment_tasks"
+
+
+class BookEnrichmentTaskEvent(_BaseEvent):
+    """Dispatched by ingestion when a book lacks page_count/publication_year."""
+
+    event_type: Literal["book_enrichment_task"] = "book_enrichment_task"
+    book_id: str
+    isbn: str | None = None
+    source: str = Field("ingestion_service") 

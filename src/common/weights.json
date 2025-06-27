@@ -1,0 +1,12 @@
+{
+  "reading_match": 1.0,
+  "reading_match_weight": 0.4,
+  "rating_boost_weight": 0.3,
+  "social_boost": 0.1,
+  "social_boost_weight": 0.2,
+  "recency_weight": 0.1,
+  "recency_half_life_days": 30,
+  "staff_pick_bonus": 0.05,
+  "cold_start_k": 20,
+  "semantic_history_count": 10
+} 

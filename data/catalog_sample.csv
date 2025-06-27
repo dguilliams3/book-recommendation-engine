@@ -1,6 +1,101 @@
-book_id,isbn,title,genre,keywords,description,difficulty_band,average_student_rating,reading_level
-B001,9780956932303,The Secret Lake,"[""mystery"",""adventure""]","[""time travel"",""siblings""]","Two children find a lake that is a portal to the past.",easy,4.6,2.0
-B002,9781338680454,Dog Man: Grime and Punishment,"[""graphic_novel"",""humor""]","[""dog"",""cop""]","Half dog, half man, all hero—Dog Man fights crime.",easy,4.8,2.0
-B003,9780439120425,Esperanza Rising,"[""historical_fiction""]","[""immigration"",""coming of age""]","A wealthy Mexican girl rebuilds her life during the Great Depression.",medium,4.4,5.0
-B004,9780545582957,Harry Potter and the Sorcerer's Stone,"[""fantasy"",""adventure""]","[""magic"",""friendship""]","A young boy discovers he is a wizard and attends Hogwarts.",medium,4.9,5.0
-B005,9780064404990,"The Lion, the Witch and the Wardrobe","[""fantasy"",""classic""]","[""magic wardrobe"",""siblings""]","Four siblings step through a wardrobe into the land of Narnia.",hard,4.7,6.0 
+book_id,title,author,isbn,genre,difficulty_band,reading_level,publication_year,page_count,average_student_rating
+B001,Charlotte's Web,E.B. White,9780064400558,"[""fiction"", ""classic""]",early_elementary,4.4,1952,184,5.0
+B002,Diary of a Wimpy Kid,Jeff Kinney,9780810993136,"[""fiction"", ""humor""]",early_elementary,3.2,2007,217,4.5
+B003,Magic Tree House #1: Dinosaurs Before Dark,Mary Pope Osborne,9780679824114,"[""fiction"", ""adventure""]",early_elementary,2.8,1992,68,4.1
+B004,Holes,Louis Sachar,9780374332662,"[""fiction"", ""adventure""]",late_elementary,4.6,1998,233,5.0
+B005,Matilda,Roald Dahl,9780142410370,"[""fiction"", ""fantasy""]",late_elementary,5.0,1988,240,5.0
+B006,The BFG,Roald Dahl,9780142410387,"[""fiction"", ""fantasy""]",late_elementary,4.9,1982,208,5.0
+B007,Frindle,Andrew Clements,9780689818769,"[""fiction"", ""realistic""]",early_elementary,4.2,1996,105,4.0
+B008,Because of Winn-Dixie,Kate DiCamillo,9780763644321,"[""fiction"", ""realistic""]",early_elementary,3.9,2000,182,4.0
+B009,The Tale of Despereaux,Kate DiCamillo,9780763625290,"[""fiction"", ""fantasy""]",late_elementary,4.8,2003,267,4.0
+B010,Bridge to Terabithia,Katherine Paterson,9780064401845,"[""fiction"", ""realistic""]",early_elementary,4.6,1977,163,5.0
+B011,Where the Red Fern Grows,Wilson Rawls,9780440412670,"[""fiction"", ""adventure""]",late_elementary,5.2,1961,245,4.0
+B012,Hatchet,Gary Paulsen,9780689840920,"[""fiction"", ""adventure""]",late_elementary,5.7,1987,195,4.0
+B013,The Giver,Lois Lowry,9780544336261,"[""fiction"", ""dystopian""]",middle_school,5.7,1993,225,4.0
+B014,Number the Stars,Lois Lowry,9780547577098,"[""fiction"", ""historical""]",early_elementary,4.5,1989,137,4.0
+B015,Walk Two Moons,Sharon Creech,9780064405171,"[""fiction"", ""realistic""]",late_elementary,4.9,1994,280,4.0
+B016,Maniac Magee,Jerry Spinelli,9780316809061,"[""fiction"", ""realistic""]",late_elementary,4.7,1990,184,3.0
+B017,Tales of a Fourth Grade Nothing,Judy Blume,9780142408810,"[""fiction"", ""humor""]",early_elementary,3.8,1972,120,3.7
+B018,Superfudge,Judy Blume,9780142410905,"[""fiction"", ""humor""]",early_elementary,4.0,1980,166,3.7
+B019,The Indian in the Cupboard,Lynne Reid Banks,9780375847530,"[""fiction"", ""fantasy""]",early_elementary,4.3,1980,181,4.0
+B020,My Side of the Mountain,Jean Craighead George,9780141312422,"[""fiction"", ""adventure""]",late_elementary,5.0,1959,177,3.0
+B021,Island of the Blue Dolphins,Scott O'Dell,9780547328614,"[""fiction"", ""adventure""]",late_elementary,5.4,1960,181,3.0
+B022,The Phantom Tollbooth,Norton Juster,9780394820378,"[""fiction"", ""fantasy""]",late_elementary,6.1,1961,256,2.0
+B023,A Wrinkle in Time,Madeleine L'Engle,9780312367541,"[""fiction"", ""sci-fi""]",late_elementary,5.7,1962,211,3.0
+B024,The Secret Garden,Frances Hodgson Burnett,9780064401883,"[""fiction"", ""classic""]",late_elementary,6.8,1911,331,3.0
+B025,The Witches,Roald Dahl,9780142410110,"[""fiction"", ""fantasy""]",late_elementary,4.7,1983,208,4.0
+B026,James and the Giant Peach,Roald Dahl,9780142410363,"[""fiction"", ""fantasy""]",early_elementary,4.4,1961,126,4.7
+B027,Charlie and the Chocolate Factory,Roald Dahl,9780142410318,"[""fiction"", ""fantasy""]",early_elementary,4.8,1964,155,5.0
+B028,"The Lion, the Witch and the Wardrobe",C.S. Lewis,9780064404990,"[""fiction"", ""fantasy""]",late_elementary,5.7,1950,206,4.0
+B029,From the Mixed-Up Files of Mrs. Basil E. Frankweiler,E.L. Konigsburg,9780689711817,"[""fiction"", ""mystery""]",late_elementary,4.6,1967,162,4.0
+B030,The Outsiders,S.E. Hinton,9780142407332,"[""fiction"", ""realistic""]",middle_school,7.2,1967,180,2.0
+B031,Dog Man: Unleashed,Dav Pilkey,9780545935203,"[""fiction"", ""graphic""]",early_elementary,2.3,2016,256,4.7
+B032,Captain Underpants #1,Dav Pilkey,9780590846288,"[""fiction"", ""humor""]",early_elementary,2.8,1997,125,5.0
+B033,Smile,Raina Telgemeier,9780545132060,"[""fiction"", ""graphic""]",early_elementary,2.3,2010,213,5.0
+B034,New Kid,Jerry Craft,9780062691194,"[""fiction"", ""graphic""]",early_elementary,2.8,2019,256,5.0
+B035,Bones: Out from Boneville,Jeff Smith,9780439706407,"[""fiction"", ""graphic""]",early_elementary,2.6,1991,138,4.0
+B036,Amulet: The Stonekeeper,Kazu Kibuishi,9780439846813,"[""fiction"", ""graphic""]",early_elementary,3.1,2008,185,4.0
+B037,Wonder,R.J. Palacio,9780375869020,"[""fiction"", ""realistic""]",late_elementary,4.9,2012,315,5.0
+B038,Fish in a Tree,Lynda Mullaly Hunt,9780142426425,"[""fiction"", ""realistic""]",early_elementary,4.0,2015,276,4.0
+B039,Restart,Gordon Korman,9781338053777,"[""fiction"", ""realistic""]",early_elementary,4.3,2017,243,4.0
+B040,Refugee,Alan Gratz,9780545880831,"[""fiction"", ""historical""]",late_elementary,4.8,2017,317,4.0
+B041,Hoot,Carl Hiaasen,9780375829062,"[""fiction"", ""environmental""]",late_elementary,5.1,2002,292,4.0
+B042,Flush,Carl Hiaasen,9780375841392,"[""fiction"", ""environmental""]",late_elementary,5.0,2005,263,3.0
+B043,Scat,Carl Hiaasen,9780375834868,"[""fiction"", ""environmental""]",late_elementary,5.2,2009,371,3.0
+B044,The Wild Robot,Peter Brown,9780316382007,"[""fiction"", ""sci-fi""]",early_elementary,4.3,2016,279,5.0
+B045,The Wild Robot Escapes,Peter Brown,9780316382052,"[""fiction"", ""sci-fi""]",early_elementary,4.4,2018,279,5.0
+B046,The One and Only Ivan,Katherine Applegate,9780061992254,"[""fiction"", ""realistic""]",early_elementary,3.6,2012,305,4.0
+B047,Crenshaw,Katherine Applegate,9781250043238,"[""fiction"", ""realistic""]",early_elementary,3.5,2015,245,4.0
+B048,Wishtree,Katherine Applegate,9781250043221,"[""fiction"", ""fantasy""]",early_elementary,4.1,2017,216,4.0
+B049,Front Desk,Kelly Yang,9781338157796,"[""fiction"", ""realistic""]",early_elementary,4.2,2018,290,4.0
+B050,Three Times Lucky,Sheila Turnage,9780142421710,"[""fiction"", ""mystery""]",early_elementary,4.5,2012,312,4.0
+B051,National Geographic Kids Almanac 2024,National Geographic Kids,9781426373145,"[""non-fiction"", ""reference""]",early_elementary,4.0,2023,351,3.5
+B052,"Who Was Martin Luther King, Jr.?",Bonnie Bader,9780448447230,"[""non-fiction"", ""biography""]",early_elementary,3.8,2008,105,4.0
+B053,Who Was Abraham Lincoln?,Janet Pascal,9780448448862,"[""non-fiction"", ""biography""]",early_elementary,3.9,2008,105,4.0
+B054,Who Was George Washington?,Roberta Edwards,9780448448923,"[""non-fiction"", ""biography""]",early_elementary,3.7,2009,105,4.0
+B055,Who Was Albert Einstein?,Jess Brallier,9780448424965,"[""non-fiction"", ""biography""]",early_elementary,4.2,2002,105,4.0
+B056,Magic School Bus: Inside the Human Body,Joanna Cole,9780590414272,"[""non-fiction"", ""science""]",early_elementary,3.4,1989,48,4.0
+B057,National Geographic Readers: Sharks!,Anne Schreiber,9781426307027,"[""non-fiction"", ""science""]",beginner,2.1,2008,32,4.0
+B058,National Geographic Readers: Dolphins!,Melissa Stewart,9781426307492,"[""non-fiction"", ""science""]",beginner,2.0,2010,32,4.0
+B059,Horrible Histories: The Rotten Romans,Terry Deary,9780439944007,"[""non-fiction"", ""history""]",early_elementary,4.8,1994,144,4.0
+B060,Horrible Histories: The Vicious Vikings,Terry Deary,9780439944168,"[""non-fiction"", ""history""]",early_elementary,4.9,1994,144,4.0
+B061,Wings of Fire #1: The Dragonet Prophecy,Tui T. Sutherland,9780545349239,"[""fiction"", ""fantasy""]",late_elementary,5.0,2012,290,5.0
+B062,Wings of Fire #2: The Lost Heir,Tui T. Sutherland,9780545349246,"[""fiction"", ""fantasy""]",late_elementary,5.1,2013,299,5.0
+B063,Wings of Fire #3: The Hidden Kingdom,Tui T. Sutherland,9780545349253,"[""fiction"", ""fantasy""]",late_elementary,5.0,2013,299,5.0
+B064,Dork Diaries #1,Rachel Renée Russell,9781416980087,"[""fiction"", ""humor""]",early_elementary,3.7,2009,282,4.0
+B065,Dork Diaries #2: Party Time,Rachel Renée Russell,9781416997474,"[""fiction"", ""humor""]",early_elementary,3.8,2010,284,4.0
+B066,The Baby-Sitters Club #1: Kristy's Great Idea,Ann M. Martin,9780545813877,"[""fiction"", ""realistic""]",early_elementary,4.0,2015,158,4.0
+B067,Dog Days,Jeff Kinney,9780810983915,"[""fiction"", ""humor""]",early_elementary,3.3,2009,224,4.0
+B068,The Last Straw,Jeff Kinney,9780810987739,"[""fiction"", ""humor""]",early_elementary,3.1,2009,217,4.0
+B069,Rodrick Rules,Jeff Kinney,9780810994737,"[""fiction"", ""humor""]",early_elementary,3.2,2008,216,4.0
+B070,The Ugly Truth,Jeff Kinney,9780810984912,"[""fiction"", ""humor""]",early_elementary,3.4,2010,217,4.0
+B071,Cabin Fever,Jeff Kinney,9780810996137,"[""fiction"", ""humor""]",early_elementary,3.3,2011,217,3.0
+B072,The Third Wheel,Jeff Kinney,9780810989641,"[""fiction"", ""humor""]",early_elementary,3.2,2012,217,4.0
+B073,Hard Luck,Jeff Kinney,9781419711893,"[""fiction"", ""humor""]",early_elementary,3.3,2013,217,4.0
+B074,The Long Haul,Jeff Kinney,9781419717475,"[""fiction"", ""humor""]",early_elementary,3.4,2014,217,3.0
+B075,Old School,Jeff Kinney,9781419720215,"[""fiction"", ""humor""]",early_elementary,3.5,2015,217,4.0
+B076,Double Down,Jeff Kinney,9781419723445,"[""fiction"", ""humor""]",early_elementary,3.4,2016,217,4.0
+B077,The Getaway,Jeff Kinney,9781419725456,"[""fiction"", ""humor""]",early_elementary,3.3,2017,217,4.0
+B078,The Meltdown,Jeff Kinney,9781419728563,"[""fiction"", ""humor""]",early_elementary,3.4,2018,217,4.1
+B079,Wrecking Ball,Jeff Kinney,9781419739507,"[""fiction"", ""humor""]",early_elementary,3.5,2019,217,3.0
+B080,The Deep End,Jeff Kinney,9781419749506,"[""fiction"", ""humor""]",early_elementary,3.4,2020,217,3.9
+B081,Big Shot,Jeff Kinney,9781419756702,"[""fiction"", ""humor""]",early_elementary,3.5,2021,217,4.0
+B082,Diper Överlöde,Jeff Kinney,9781419759604,"[""fiction"", ""humor""]",early_elementary,3.4,2022,217,3.9
+B083,"I Survived the Sinking of the Titanic, 1912",Lauren Tarshis,9780545206945,"[""fiction"", ""historical""]",early_elementary,4.0,2010,112,4.0
+B084,I Survived the Shark Attacks of 1916,Lauren Tarshis,9780545206952,"[""fiction"", ""historical""]",early_elementary,4.1,2010,112,4.0
+B085,"I Survived Hurricane Katrina, 2005",Lauren Tarshis,9780545206976,"[""fiction"", ""historical""]",early_elementary,4.2,2011,112,4.0
+B086,Goosebumps: Welcome to Dead House,R.L. Stine,9780545035217,"[""fiction"", ""horror""]",early_elementary,3.6,1992,123,3.0
+B087,Goosebumps: Stay Out of the Basement,R.L. Stine,9780545035224,"[""fiction"", ""horror""]",early_elementary,3.7,1992,123,3.0
+B088,Goosebumps: Monster Blood,R.L. Stine,9780545035231,"[""fiction"", ""horror""]",early_elementary,3.5,1992,123,3.0
+B089,Goosebumps: Say Cheese and Die!,R.L. Stine,9780545035248,"[""fiction"", ""horror""]",early_elementary,3.6,1992,123,3.0
+B090,The Bad Guys in The Baddest Day Ever,Aaron Blabey,9781338271584,"[""fiction"", ""humor""]",beginner,2.4,2018,144,5.0
+B091,The Bad Guys in The Furball Strikes Back,Aaron Blabey,9781338271577,"[""fiction"", ""humor""]",beginner,2.3,2018,144,5.0
+B092,The Bad Guys in Attack of the Zittens,Aaron Blabey,9781338271591,"[""fiction"", ""humor""]",beginner,2.5,2018,144,5.0
+B093,Dog Man: Mothering Heights,Dav Pilkey,9781338535624,"[""fiction"", ""graphic""]",early_elementary,2.4,2021,256,5.0
+B094,Dog Man: Fetch-22,Dav Pilkey,9781338535600,"[""fiction"", ""graphic""]",early_elementary,2.5,2019,256,5.0
+B095,Dog Man: Grime and Punishment,Dav Pilkey,9781338535631,"[""fiction"", ""graphic""]",early_elementary,2.4,2020,256,5.0
+B096,The Magic School Bus: Lost in the Solar System,Joanna Cole,9780590414296,"[""non-fiction"", ""science""]",early_elementary,3.3,1990,48,4.2
+B097,The Magic School Bus: On the Ocean Floor,Joanna Cole,9780590414289,"[""non-fiction"", ""science""]",early_elementary,3.4,1992,48,4.1
+B098,The Magic School Bus: In the Time of the Dinosaurs,Joanna Cole,9780590446891,"[""non-fiction"", ""science""]",early_elementary,3.5,1994,48,4.3
+B099,The Magic School Bus: Inside a Hurricane,Joanna Cole,9780590446907,"[""non-fiction"", ""science""]",early_elementary,3.6,1995,48,4.0
+B100,The Magic School Bus: Electric Field Trip,Joanna Cole,9780590446945,"[""non-fiction"", ""science""]",early_elementary,3.7,1997,48,4.1

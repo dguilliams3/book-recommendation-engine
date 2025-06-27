@@ -1,16 +1,17 @@
 import asyncio, json, os, uuid, time, sys
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Query
 from starlette.responses import JSONResponse
 from mcp import StdioServerParameters, stdio_client, ClientSession
 from common import SettingsInstance as S
 from common.structured_logging import get_logger, SERVICE_NAME
 from langchain.prompts import ChatPromptTemplate
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy import text
 from . import db_models
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
-from common.kafka_utils import event_producer
+from common.kafka_utils import publish_event
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from langchain_core.messages import AIMessage
@@ -39,12 +40,23 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("Shutting down recommendation API")
-    try:
-        await event_producer.close()
-    except Exception:
-        logger.error("Error stopping Kafka producer", exc_info=True)
+    # Producer cleanup handled automatically per event loop
+    logger.debug("Kafka producer cleanup handled automatically")
 
-app = FastAPI(title="Book-Recommendation-API", lifespan=lifespan)
+app = FastAPI(
+    title="Book Recommendation Engine API",
+    description="AI-powered book recommendation system for educational institutions",
+    version="1.0.0",
+    contact={
+        "name": "Dan Guilliams",
+        "email": "dan@example.com"
+    },
+    license_info={
+        "name": "MIT",
+        "url": "https://opensource.org/licenses/MIT"
+    },
+    lifespan=lifespan
+)
 logger = get_logger(__name__)
 
 # --- auto-DDL setup ----------------------------------------------------
@@ -64,6 +76,18 @@ async def _ensure_tables():
     try:
         async with engine.begin() as conn:
             await conn.run_sync(db_models.Base.metadata.create_all)
+            # Additional idempotent DDL for recommendation_history with composite PK
+            await conn.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS recommendation_history (
+                    student_id TEXT NOT NULL,
+                    book_id TEXT NOT NULL,
+                    recommended_at TIMESTAMPTZ DEFAULT NOW(),
+                    justification TEXT,
+                    PRIMARY KEY (student_id, book_id)
+                );
+                """
+            ))
         logger.info("Database tables verified/created successfully")
     except Exception as e:
         logger.error("Failed to create database tables", exc_info=True)
@@ -74,7 +98,7 @@ logger.info("Initializing Kafka producer for metrics")
 TOPIC = "api_metrics"
 
 async def push_metric(event: str, extra: dict | None = None):
-    """Send metric to Kafka without blocking the caller."""
+    """Send metric to Kafka and Redis without blocking the caller."""
     # Compose payload once
     payload = {"event": event, "timestamp": time.time(), "request_id": uuid.uuid4().hex}
     if extra:
@@ -82,8 +106,24 @@ async def push_metric(event: str, extra: dict | None = None):
 
     async def _send():
         try:
-            await event_producer.publish_event(TOPIC, payload)
-            logger.debug("Metric pushed", extra={"event": event, "payload": payload})
+            # Send to Kafka
+            await publish_event(TOPIC, payload)
+            logger.debug("Metric pushed to Kafka", extra={"event": event, "payload": payload})
+            
+            # Also store in Redis for Streamlit access
+            try:
+                from common.redis_utils import get_redis_client
+                redis_client = get_redis_client()
+                redis_key = "metrics:api:recent"
+                
+                import json
+                await redis_client.lpush(redis_key, json.dumps(payload))
+                await redis_client.ltrim(redis_key, 0, 19)  # Keep only last 20
+                
+                logger.debug("Metric stored in Redis", extra={"event": event, "key": redis_key})
+            except Exception as redis_error:
+                logger.warning(f"Failed to store metric in Redis: {redis_error}")
+                
         except Exception:
             logger.error("Failed to push metric", exc_info=True, extra={"event": event})
 
@@ -112,7 +152,12 @@ server_params = StdioServerParameters(
 )
 
 # --- LLM model for ReAct agent ---------------------------------------
-chat_model = ChatOpenAI(model=S.model_name, api_key=S.openai_api_key, temperature=0.3)
+chat_model = ChatOpenAI(
+    model=S.model_name,
+    api_key=S.openai_api_key,
+    temperature=0.3,
+    max_tokens=S.model_max_tokens,
+)
 logger.info("ChatOpenAI model initialised for ReAct agent")
 
 async def ask_agent(agent, query: str, callbacks=None):
@@ -141,8 +186,80 @@ async def metrics():
     logger.debug("Metrics endpoint requested")
     return JSONResponse({"status": "ok"})
 
-@app.post("/recommend")
-async def recommend(student_id: str, n: int = 3, query: str = "adventure"):
+@app.post(
+    "/recommend", 
+    response_model=RecommendResponse, 
+    response_model_exclude_none=True,
+    summary="Generate book recommendations for a student",
+    description="""
+    Generate personalized book recommendations for a student based on their reading history,
+    preferences, and optional search query. Uses AI-powered analysis to match books to
+    student reading level and interests.
+    
+    **Privacy Controls:**
+    - Set `SUPER_USER=1` environment variable to include student context in response
+    - Default responses exclude sensitive student information
+    
+    **Rate Limits:**
+    - Recommendations are cached and logged to prevent abuse
+    - Complex LLM processing may take 5-15 seconds
+    """,
+    responses={
+        200: {
+            "description": "Successful recommendation generation",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "request_id": "abc123",
+                        "duration_sec": 8.45,
+                        "recommendations": [
+                            {
+                                "book_id": "B001",
+                                "title": "Charlotte's Web",
+                                "author": "E.B. White",
+                                "reading_level": 5.2,
+                                "librarian_blurb": "A heartwarming tale of friendship between a pig and spider.",
+                                "justification": "Matches student's interest in animal stories and appropriate reading level."
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        422: {
+            "description": "Invalid request parameters",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": [
+                            {
+                                "loc": ["query", "student_id"],
+                                "msg": "field required",
+                                "type": "value_error.missing"
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        500: {
+            "description": "Internal server error during recommendation generation",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Failed to generate recommendation"
+                    }
+                }
+            }
+        }
+    },
+    tags=["recommendations"]
+)
+async def recommend(
+    student_id: str = Query(..., description="Student identifier (e.g., 'S001')", example="S001"),
+    n: int = Query(3, ge=1, le=10, description="Number of recommendations to return", example=3),
+    query: str = Query("", description="Optional search query to filter recommendations", example="space adventure")
+):
     request_id = uuid.uuid4().hex
 
     logger.info("Recommendation request received", extra={
@@ -176,6 +293,8 @@ async def recommend(student_id: str, n: int = 3, query: str = "adventure"):
             request_id=request_id,
             duration_sec=round(total_duration, 3),
             recommendations=recs,
+            student_avg_level=meta.get('student_avg_level'),
+            recent_books=meta.get('recent_books'),
         )
 
     except Exception as exc:
@@ -224,7 +343,7 @@ async def _prometheus_middleware(request: Request, call_next):  # noqa: D401
     return response
 
 # ---------------------------------------------------------------------------
-# Script entry-point (mirrors pattern from main_security_agent_server.py)
+# Script entry-point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn

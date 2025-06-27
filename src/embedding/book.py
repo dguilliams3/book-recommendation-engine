@@ -19,6 +19,10 @@ class BookFlattener(Flattener):
         grade_label = numeric_to_grade_text(level)
 
         text_parts = [row.get("title", ""), row.get("description", ""), *genres, *keywords]
+        # Include author name to improve semantic clustering
+        author = row.get("author")
+        if author:
+            text_parts.append(author)
         if grade_label:
             text_parts.append(grade_label)
         text = ". ".join(filter(None, text_parts))
@@ -29,5 +33,6 @@ class BookFlattener(Flattener):
             "grade_label": grade_label,
             "genre": genres,
             "keywords": keywords,
+            "author": author,
         }
         return text, meta 

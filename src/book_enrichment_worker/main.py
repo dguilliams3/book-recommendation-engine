@@ -12,7 +12,7 @@ from common import SettingsInstance as S
 from common.structured_logging import get_logger
 from recommendation_api.tools import readability_formula_estimator
 from common.events import BookUpdatedEvent, BOOK_EVENTS_TOPIC
-from common.kafka_utils import event_producer as ep
+from common.kafka_utils import publish_event
 
 logger = get_logger(__name__)
 
@@ -153,6 +153,15 @@ async def main():
             if meta:
                 vi = meta.get("items", [{}])[0].get("volumeInfo", {}) if isinstance(meta, dict) else meta
                 page = vi.get("pageCount")
+                
+                # Validate page count - reject 0 or invalid values
+                if page is not None and (not isinstance(page, int) or page <= 0):
+                    logger.debug("Invalid page count received, treating as None", extra={
+                        "book_id": book_id,
+                        "invalid_page_count": page
+                    })
+                    page = None
+                
                 pub = vi.get("publishedDate", "")
                 if isinstance(pub, str):
                     year = pub[:4]
@@ -187,7 +196,7 @@ async def main():
                 # Publish BookUpdated event
                 try:
                     upd_evt = BookUpdatedEvent(book_id=book_id, payload={"page_count": page, "publication_year": year})
-                    await ep.publish_event(BOOK_EVENTS_TOPIC, upd_evt.dict())
+                    await publish_event(BOOK_EVENTS_TOPIC, upd_evt.model_dump())
                 except Exception:
                     logger.warning("Failed to publish book updated event", extra={"book_id": book_id})
             

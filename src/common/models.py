@@ -8,6 +8,7 @@ class BookCatalogItem(BaseModel):
     book_id: str
     isbn: str | None = None
     title: str
+    author: Optional[str] = None
     genre: List[str] = Field(default_factory=list)
     keywords: List[str] = Field(default_factory=list)
     description: Optional[str] = None
@@ -51,6 +52,7 @@ class StudentRecord(BaseModel):
     lunch_period: conint(ge=1, le=2)
 
 class CheckoutRecord(BaseModel):
+    checkout_id: Optional[str] = None
     student_id: str
     book_id: str
     checkout_date: date

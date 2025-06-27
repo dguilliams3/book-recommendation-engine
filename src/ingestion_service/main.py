@@ -19,7 +19,7 @@ from sqlalchemy import text
 from common.settings import SettingsInstance as S
 from common import models
 from common.structured_logging import get_logger
-from common.kafka_utils import event_producer
+from common.kafka_utils import publish_event
 from common.events import (BookAddedEvent, BOOK_EVENTS_TOPIC, StudentAddedEvent,
                             StudentUpdatedEvent, CheckoutAddedEvent, STUDENT_EVENTS_TOPIC,
                             CHECKOUT_EVENTS_TOPIC)
@@ -29,24 +29,13 @@ from common.metrics import JOB_RUNS_TOTAL, JOB_DURATION_SECONDS
 logger = get_logger(__name__)
 TOPIC = "ingestion_metrics"
 
-async def _publish(payload):  # fire-and-forget
-    """Publish a metric payload to Kafka without awaiting acknowledgements.
-
-    This helper is used for emitting one-off ingestion metrics such as total
-    runtime or row counts.  It intentionally *does not* raise if Kafka is
-    unavailable so that the ingestion process can still succeed offline.
-
-    Parameters
-    ----------
-    payload : dict
-        Arbitrary JSON-serialisable dictionary to send to the `ingestion_metrics`
-        topic.
-    """
+async def _send(payload):
+    """Send metrics payload to Kafka."""
     try:
-        await event_producer.publish_event(TOPIC, payload)
-        logger.debug("Metric published", extra={"payload": payload})
-    except Exception as e:
-        logger.error("Failed to publish metric", exc_info=True, extra={"payload": payload})
+        await publish_event(TOPIC, payload)
+        logger.debug("Metric sent successfully", extra={"payload": payload})
+    except Exception:
+        logger.error("Metric send failed", exc_info=True, extra={"payload": payload})
 
 def ingest():
     """Run the ingestion pipeline and emit Prometheus job metrics."""

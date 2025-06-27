@@ -24,3 +24,89 @@ tests_data/
 *.pyzw
 *.pyzwz
 
+# Git and version control (HUGE impact - can be 100MB+)
+.git/
+.gitignore
+
+# Documentation (not needed in containers)
+docs/
+README.md
+DEVELOPMENT_TEST_PLAN.md
+Cursor Agent Recommendations for Prompt and Pre-Agent Data Injection.md
+
+# Development and example code (LARGE impact - 50MB+)
+EXAMPLES USING MCP AND LANGCHAIN REACT/
+development_scripts/
+
+# Runtime data (not build-time)
+logs/
+
+# IDE and editor files
+.cursor/
+.vscode/
+.idea/
+
+# CI/CD (not needed in containers)
+.github/
+
+# Package metadata (auto-generated)
+book_recommendation_engine.egg-info/
+*.egg-info/
+
+# Poetry files (if using pip in containers)
+poetry.lock
+
+# Deployment configs (not needed in containers)
+prometheus.yml
+docker-compose.yml
+docker-compose.prod.yml
+
+# Utility scripts (not needed in containers)
+check_database.py
+update_ratings.py
+
+# Environment files
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Heavy data directories (already excluded by .gitignore but good to be explicit)
+data/vector_store/
+
+# =============================================================================
+# ANALYSIS: What's actually excluded by Dockerfile design vs .dockerignore
+# =============================================================================
+# 
+# EXCLUDED BY DOCKERFILE DESIGN (these .dockerignore entries are redundant but safe):
+# - .git/, docs/, README.md, etc. (Dockerfiles only copy specific src/ subdirectories)
+# - tests/, development_scripts/, etc. (never copied by any Dockerfile)
+# - poetry.lock (Dockerfiles use pip, not poetry)
+# - docker-compose.yml (deployment config, not copied)
+# - check_database.py, update_ratings.py (utility scripts, not copied)
+#
+# HIGH IMPACT EXCLUSIONS (these actually matter for build performance):
+# - .git/ (100MB+ of git history)
+# - EXAMPLES USING MCP AND LANGCHAIN REACT/ (50MB+ of example code)
+# - book_recommendation_engine.egg-info/ (auto-generated metadata)
+# - logs/ (runtime data)
+# - .cursor/, .vscode/ (IDE files)
+#
+# WHAT DOCKERFILES ACTUALLY COPY:
+# - src/common/ (shared code)
+# - src/[service_name]/ (specific service code)
+# - sql/ (database schemas - only ingestion_service)
+# - data/ (sample data - only ingestion_service)
+# - src/cli.py (CLI tool - only ingestion_service)
+# - src/recommendation_api/ (API code - only ingestion_service)
+# - src/embedding/ (embedding code - only ingestion_service)
+

@@ -1,17 +1,21 @@
 """
 Shared Kafka utilities for event publishing and consumption.
+
+Fixed AsyncIO issues by ensuring producers are created in the correct event loop context.
+Each service gets its own producer instance to avoid loop conflicts.
 """
 import json
 import asyncio
-from typing import Optional, Callable, Any
+from typing import Optional, Callable, Any, Dict
 from aiokafka import AIOKafkaProducer, AIOKafkaConsumer
 from aiokafka.errors import KafkaError
 import logging
 
 from .settings import settings
 from .events import BOOK_EVENTS_TOPIC, GRAPH_EVENTS_TOPIC
+from .structured_logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Prometheus metrics (optional)
 try:
@@ -131,5 +135,36 @@ class KafkaEventConsumer:
             logger.info(f"Stopped Kafka consumer for topic {self.topic}")
 
 
-# Global producer instance
-event_producer = KafkaEventProducer() 
+# Thread-local producer storage to avoid loop conflicts
+_producers: Dict[int, KafkaEventProducer] = {}
+_producer_lock = asyncio.Lock()
+
+
+async def get_event_producer() -> KafkaEventProducer:
+    """Get or create a producer for the current event loop.
+    
+    This fixes the 'Future attached to different loop' error by ensuring
+    each asyncio loop gets its own producer instance.
+    """
+    loop_id = id(asyncio.get_running_loop())
+    
+    if loop_id not in _producers:
+        async with _producer_lock:
+            if loop_id not in _producers:
+                logger.debug("Creating new Kafka producer for event loop", extra={"loop_id": loop_id})
+                _producers[loop_id] = KafkaEventProducer()
+    
+    return _producers[loop_id]
+
+
+async def publish_event(topic: str, event: dict) -> bool:
+    """Convenience function for publishing events.
+    
+    This is the main interface that services should use. It handles
+    the producer lifecycle automatically.
+    """
+    try:
+        producer = await get_event_producer()
+        return await producer.publish_event(topic, event)
+    except Exception as e:
+        logger.error("Unexpected error publishing event", exc_info=True, extra={"topic": topic}) 
