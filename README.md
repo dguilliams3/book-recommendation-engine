@@ -152,9 +152,9 @@ docker compose up --build
 ```
 
 ### Sample Data Included
-- **3 Books**: Elementary-appropriate titles with metadata
-- **3 Students**: Diverse reading levels and preferences  
-- **5 Checkout Records**: Historical data for recommendation training
+- **100 Books**: Elementary-appropriate titles with metadata
+- **25 Students**: Diverse reading levels and preferences  
+- **160 Checkout Records for Students**: Historical data for recommendation training
 - **Automated Workers**: Nightly enrichment (01:00) + graph refresh (02:00)
 
 ---
