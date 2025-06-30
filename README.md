@@ -162,8 +162,8 @@ docker compose up --build
 ## 📊 Performance Benchmarks
 
 ### Response Times (95th percentile)
-- **Single Recommendation**: < 800ms
-- **Batch Recommendations**: < 2.5s (5 students)
+- **Single Recommendation**: ≈ 10s (LLM call bottleneck, subsecond preprocessing time)
+- **Batch Recommendations**: TBD, but trivial difference with above unless we send in subbatches in multiple LLM calls.
 - **Vector Search**: < 50ms (10K book corpus)
 - **Student Similarity**: < 100ms (1K student database)
 
