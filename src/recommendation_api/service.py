@@ -16,6 +16,7 @@ import asyncio, json, os, time
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, List, Tuple
+from collections import Counter
 
 from mcp import StdioServerParameters, stdio_client, ClientSession
 from langchain_openai import ChatOpenAI
@@ -173,31 +174,83 @@ async def generate_recommendations(
 
             # --- Fetch student context -------------------------------------------------
             async def _student_context():
+                """Return rich student context for prompt & meta.
+
+                Returns:
+                    tuple(avg_level, recent_titles, top_genres, band_hist)
+                """
                 async with engine.begin() as conn:
                     rows = await conn.execute(
                         text("""
-                             SELECT c.title, c.reading_level
+                             SELECT c.title, c.reading_level, c.genre
                                FROM checkout co
                                JOIN catalog c USING(book_id)
                               WHERE co.student_id = :sid
-                           ORDER BY co.checkout_date DESC LIMIT 5"""),
+                           ORDER BY co.checkout_date DESC LIMIT 30"""),
                         {"sid": student_id},
                     )
-                    titles = []
-                    levels = []
+
+                    titles: list[str] = []
+                    levels: list[float] = []
+                    genres: list[str] = []
+
+                    def _level_to_band(g: float | None):
+                        if g is None:
+                            return None
+                        if g <= 2.0:
+                            return "beginner"
+                        if g <= 4.0:
+                            return "early_elementary"
+                        if g <= 6.0:
+                            return "late_elementary"
+                        if g <= 8.0:
+                            return "middle_school"
+                        return "advanced"
+
+                    bands: list[str] = []
+
                     for r in rows:
-                        title, rl = r[0], r[1]
+                        title, rl, genre = r[0], r[1], r[2]
                         if title:
                             titles.append(title)
                         if rl is not None:
                             levels.append(float(rl))
+                            band = _level_to_band(float(rl))
+                            if band:
+                                bands.append(band)
+                        if genre:
+                            genres.append(genre)
+
                     avg_level = round(sum(levels) / len(levels), 1) if levels else None
-                    return avg_level, titles
-            avg_level, recent_titles = await _student_context()
-            context_line = "Student average RL: " + (f"{avg_level}" if avg_level else "unknown")
+                    top_genres = [g for g, _ in Counter(genres).most_common(3)] if genres else []
+                    band_hist = dict(Counter(bands)) if bands else {}
+                    recent_titles = titles[:5]
+
+                    return avg_level, recent_titles, top_genres, band_hist
+
+            avg_level, recent_titles, top_genres, band_hist = await _student_context()
+
+            # Build human-readable context string for the LLM
+            ctx_parts: list[str] = []
+            ctx_parts.append("Student average RL: " + (f"{avg_level}" if avg_level else "unknown"))
             if recent_titles:
-                context_line += "; recent books: " + ", ".join(recent_titles)
-            context_line += "\n"
+                ctx_parts.append("Recent books: " + ", ".join(recent_titles))
+            if top_genres:
+                ctx_parts.append("Top genres: " + ", ".join(top_genres))
+            if band_hist:
+                band_str = ", ".join(f"{b}:{cnt}" for b, cnt in band_hist.items())
+                ctx_parts.append("Difficulty bands: " + band_str)
+
+            context_line = "; ".join(ctx_parts) + "\n"
+
+            # --- DEBUG: log constructed context string ----------------------
+            logger.debug(
+                "LLM context_line created",
+                extra={
+                    "student_id": student_id,
+                    "context_line": context_line,
+                },
+            )
 
             # ------------------------------------------------------------------
             # Build candidates → score → prompt → LLM
@@ -225,6 +278,15 @@ async def generate_recommendations(
                 context_line +
                 "Recommend {n} books for student {sid}. Choices:\n".format(n=n, sid=student_id)
                 + "\n".join(cand_lines)
+            )
+
+            # --- DEBUG: log final user prompt sent to build_prompt -----------
+            logger.debug(
+                "Raw user_prompt built",
+                extra={
+                    "student_id": student_id,
+                    "raw_user_prompt": raw_user_prompt,
+                },
             )
 
             prompt_messages = build_prompt(raw_user_prompt)
@@ -354,6 +416,8 @@ async def generate_recommendations(
     if os.getenv("SUPER_USER") == "1":
         meta["student_avg_level"] = avg_level
         meta["recent_books"] = recent_titles
+        meta["top_genres"] = top_genres
+        meta["band_histogram"] = band_hist
 
     # ------------------------------------------------------------------
     # Idempotent history logging
