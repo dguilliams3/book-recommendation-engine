@@ -152,9 +152,9 @@ docker compose up --build
 ```
 
 ### Sample Data Included
-- **3 Books**: Elementary-appropriate titles with metadata
-- **3 Students**: Diverse reading levels and preferences  
-- **5 Checkout Records**: Historical data for recommendation training
+- **100 Books**: Elementary-appropriate titles with metadata
+- **25 Students**: Diverse reading levels and preferences  
+- **160 Checkout Records for Students**: Historical data for recommendation training
 - **Automated Workers**: Nightly enrichment (01:00) + graph refresh (02:00)
 
 ---
@@ -162,8 +162,8 @@ docker compose up --build
 ## 📊 Performance Benchmarks
 
 ### Response Times (95th percentile)
-- **Single Recommendation**: < 800ms
-- **Batch Recommendations**: < 2.5s (5 students)
+- **Single Recommendation**: ≈ 10s (LLM call bottleneck, subsecond preprocessing time)
+- **Batch Recommendations**: TBD, but trivial difference with above unless we send in subbatches in multiple LLM calls.
 - **Vector Search**: < 50ms (10K book corpus)
 - **Student Similarity**: < 100ms (1K student database)
 
