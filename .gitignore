@@ -4,8 +4,8 @@ archive/
 data/vector_store/*
 
 # Caching and bytecode
-*/__pycache__/*
 __pycache__/
+**/__pycache__/
 *.pyc
 *.pyo
 *.pyd
