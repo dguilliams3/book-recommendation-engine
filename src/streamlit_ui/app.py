@@ -7,21 +7,24 @@ from common import SettingsInstance as S
 from common.structured_logging import get_logger
 import pandas as pd
 from sqlalchemy import create_engine
+from sqlalchemy import text
 from pathlib import Path
 import time
 from common.redis_utils import get_redis_client
 
 logger = get_logger(__name__)
 
-@st.cache_data
 def get_all_student_ids():
     try:
         engine = create_engine(str(S.db_url).replace("+asyncpg", ""))
+        logger.debug(f"Connecting to DB: {engine.url}")
         with engine.connect() as conn:
-            rows = conn.execute("SELECT student_id FROM students").fetchall()
-        return sorted([r[0] for r in rows])
+            rows = conn.execute(text("SELECT student_id FROM students")).fetchall()
+        ids = sorted([r[0] for r in rows])
+        logger.debug(f"Fetched {len(ids)} student IDs: {ids[:5]} ...")
+        return ids
     except Exception as e:
-        logger.warning(f"Could not load student IDs: {e}")
+        logger.error("Failed to load student IDs", exc_info=True)
         return []
 
 API_URL = f"http://recommendation_api:{S.api_port}/recommend"
@@ -180,34 +183,33 @@ def main():
         with st.form("recommendation_form"):
             # Student ID input with autocomplete
             student_ids = get_all_student_ids()
-            student_id_input = st.text_input("Student ID (type or select)")
 
-            matching_ids = [sid for sid in student_ids
-                            if student_id_input.upper() in sid.upper()]
+            if not student_ids:
+                st.warning("⚠️ No students found. Is the ingestion service finished?")
+                student_id = ""
+            else:
+                student_id = st.selectbox(
+                    "Student ID",
+                    options=student_ids,
+                    placeholder="Type or pick a student ID",
+                )
 
-            selected_id = st.selectbox(
-                "Matching IDs (optional)",
-                options = matching_ids if matching_ids else ["(no matches)"],
-                key = "student_dropdown"
+            interests = st.text_area(
+                "Keywords/Interests (comma-separated)",
+                value="adventure, animals, space",
+                help="Enter keywords describing what the student likes to read about",
             )
-
-            student_id = student_id_input.strip() or (
-                selected_id if selected_id != "(no matches)" else ""
-            )
-            
-            interests = st.text_area("Keywords/Interests (comma-separated)", 
-                                   value="adventure, animals, space", 
-                                   help="Enter keywords describing what the student likes to read about")
             num_recommendations = st.slider("Number of recommendations", 1, 5, 3)
-            
+
             submitted = st.form_submit_button("Get Recommendation")
-            
+
             if submitted:
                 with st.spinner("Getting recommendation..."):
                     result = get_recommendation(student_id, interests, num_recommendations)
-                    
+
                     if "error" in result:
                         st.error(result["error"])
+                        st.json(result)
                     else:
                         st.success("Recommendation received!")
                         st.json(result)
