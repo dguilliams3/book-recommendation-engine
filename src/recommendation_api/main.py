@@ -25,6 +25,8 @@ from .service import (
     generate_recommendations,
 )
 from common.metrics import REQUEST_COUNTER, REQUEST_LATENCY
+from pydantic import BaseModel, Field
+from typing import List, Dict, Any
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -185,6 +187,84 @@ def health():
 async def metrics():
     logger.debug("Metrics endpoint requested")
     return JSONResponse({"status": "ok"})
+
+# --- Pydantic models for Swagger --------------------------------------------
+class BookRow(BaseModel, extra="allow"):
+    """Flexible model that accepts any catalog columns."""
+    book_id: str = Field(..., example="B001")
+
+class BooksResponse(BaseModel):
+    rows: List[BookRow]
+
+class MetricItem(BaseModel):
+    label: str = Field(..., example="recommendation_served")
+    value: int = Field(..., example=42)
+
+# ---------------------------------------------------------------------------
+# New endpoints for React UI -------------------------------------------------
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/books",
+    tags=["catalog"],
+    summary="Return a slice of the book catalog",
+    response_model=BooksResponse,
+    responses={
+        200: {"description": "Catalog slice returned"},
+        400: {"description": "Invalid limit parameter"},
+        500: {"description": "Database query failed"},
+    },
+)
+async def get_books(limit: int = Query(100, ge=1, le=500, description="Max rows to return")):
+    """Simple endpoint so the React UI can populate its data-explorer table."""
+    try:
+        async with engine.connect() as conn:
+            result = await conn.execute(
+                text("SELECT * FROM catalog ORDER BY book_id LIMIT :limit"),
+                {"limit": limit},
+            )
+            rows = [dict(row) for row in result]
+        return {"rows": rows}
+    except HTTPException:
+        raise  # re-throw untouched
+    except Exception as exc:
+        logger.error("Failed to fetch books", exc_info=True)
+        raise HTTPException(500, "Failed to fetch books") from exc
+
+@app.get(
+    "/metrics/summary",
+    tags=["metrics"],
+    summary="Aggregate recent metric events (last 20) for quick charts",
+    response_model=List[MetricItem],
+    responses={
+        200: {"description": "Counts returned (may be empty)"},
+    },
+)
+async def metrics_summary():
+    """Aggregate last ~20 metric events stored in Redis.
+
+    If Redis is unavailable, returns a single placeholder so the UI does not
+    break. This keeps the endpoint always 200-OK to avoid noisy errors in the
+    SPA while still logging the real issue.
+    """
+    try:
+        from common.redis_utils import get_redis_client
+
+        redis_client = get_redis_client()
+        raw_items = await redis_client.lrange("metrics:api:recent", 0, -1)
+        counts: Dict[str, int] = {}
+        for b in raw_items:
+            try:
+                payload: Dict[str, Any] = json.loads(b)
+                event = payload.get("event", "unknown")
+                counts[event] = counts.get(event, 0) + 1
+            except Exception:
+                continue
+        return [{"label": k, "value": v} for k, v in counts.items()]
+    except Exception as exc:
+        logger.warning("Failed to fetch metrics summary", exc_info=True)
+        # Graceful degradation – return placeholder instead of 500 so UI chart renders
+        return [{"label": "no_data", "value": 0}]
 
 @app.post(
     "/recommend", 

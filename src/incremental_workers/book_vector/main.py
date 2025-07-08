@@ -64,14 +64,43 @@ async def handle_book_event(evt: dict):
     # Fetch book data from DB lazily to avoid large event payloads
     pg_url = str(S.db_url).replace("postgresql+asyncpg://", "postgresql://")
     conn = await asyncpg.connect(pg_url)
-    rows = await conn.fetch("SELECT book_id,title,description FROM catalog WHERE book_id = ANY($1::text[])", ids)
+    rows = await conn.fetch(
+        """SELECT book_id,title,author,genre,difficulty_band,reading_level,publication_year,description
+           FROM catalog WHERE book_id = ANY($1::text[])""",
+        ids,
+    )
     await conn.close()
     if not rows:
         logger.warning("No matching books found", extra={"ids": ids, "event_id": event_id})
         return
         
-    texts = [f"{r['title']}. {r['description'] or ''}" for r in rows]
-    metadatas = [{"book_id": r["book_id"]} for r in rows]
+    texts = []
+    metadatas = []
+    for r in rows:
+        # Parse genre JSON array stored as text – fallback to empty list on error
+        try:
+            genre_list = json.loads(r["genre"]) if r["genre"] else []
+        except Exception:
+            genre_list = []
+        genres_str = ", ".join(genre_list)
+
+        desc = r["description"] or ""
+        text = (
+            f"{r['title']} by {r['author']}. "
+            f"Genre: {genres_str}. "
+            f"Reading level: {r['reading_level']} ({r['difficulty_band']}). "
+            f"Published {r['publication_year']}. "
+            f"{desc}"
+        )
+        texts.append(text)
+
+        metadatas.append(
+            {
+                "book_id": r["book_id"],
+                "genre": genres_str,
+                "level": r["reading_level"],
+            }
+        )
     
     # Embed and add to FAISS with lock
     with FileLock(str(LOCK_FILE)):
