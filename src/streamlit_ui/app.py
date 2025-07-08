@@ -13,6 +13,17 @@ from common.redis_utils import get_redis_client
 
 logger = get_logger(__name__)
 
+@st.cache_data
+def get_all_student_ids():
+    try:
+        engine = create_engine(str(S.db_url).replace("+asyncpg", ""))
+        with engine.connect() as conn:
+            rows = conn.execute("SELECT student_id FROM students").fetchall()
+        return sorted([r[0] for r in rows])
+    except Exception as e:
+        logger.warning(f"Could not load student IDs: {e}")
+        return []
+
 API_URL = f"http://recommendation_api:{S.api_port}/recommend"
 API_TIMEOUT = int(os.getenv("STREAMLIT_API_TIMEOUT_SEC", "30"))
 MAX_RETRIES = 3
@@ -167,7 +178,23 @@ def main():
         st.header("📖 Book Recommendations")
         
         with st.form("recommendation_form"):
-            student_id = st.text_input("Student ID", value="S001", help="Enter a student ID like S001, S002, etc.")
+            # Student ID input with autocomplete
+            student_ids = get_all_student_ids()
+            student_id_input = st.text_input("Student ID (type or select)")
+
+            matching_ids = [sid for sid in student_ids
+                            if student_id_input.upper() in sid.upper()]
+
+            selected_id = st.selectbox(
+                "Matching IDs (optional)",
+                options = matching_ids if matching_ids else ["(no matches)"],
+                key = "student_dropdown"
+            )
+
+            student_id = student_id_input.strip() or (
+                selected_id if selected_id != "(no matches)" else ""
+            )
+            
             interests = st.text_area("Keywords/Interests (comma-separated)", 
                                    value="adventure, animals, space", 
                                    help="Enter keywords describing what the student likes to read about")
