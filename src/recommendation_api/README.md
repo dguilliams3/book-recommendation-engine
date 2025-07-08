@@ -157,6 +157,61 @@ REQUEST_LATENCY.labels(endpoint="recommend").observe(duration_seconds)
 - **Tool Usage Analytics**: Detailed logging of MCP tool invocations and results
 - **Error Attribution**: Stack trace correlation with business impact assessment
 
+## **Edge-Case & Fault-Tolerance Guarantees (2025-06 Update)**
+
+The service now survives *every* downstream or data-quality failure while still returning a
+`200 OK`  ❯  **No more blank screens for students.**
+
+| Scenario | Behaviour |
+|----------|-----------|
+| **Unknown `student_id`** | Returns a sentinel `Student Not Found` recommendation and sets `meta.error = "student_not_found"`. |
+| **Brand-new student (no check-outs)** | Falls back to **grade/EOG-derived reading-level** using `compute_student_reading_level` and seeds candidates from catalogue popularity. |
+| **DB / FAISS outage – zero candidates** | Pulls `n×2` random catalogue books as an emergency pool. |
+| **OpenAI or agent failure** | Returns top-ranked deterministic candidates with a polite "LLM temporarily unavailable" blurb and `meta.error = "llm_failure"`. |
+| **LLM returns < n books or malformed JSON** | Strict → JSON → raw-text parse escalation, then top-up from unused ranked candidates to guarantee **exactly _n_ books**. |
+
+All of the above paths are unit-tested and logged with structured `error_count`/`error` fields for easy Grafana alerts.
+
+## **Vector-Store Schema & Concrete Examples**
+
+### Book embeddings (`book_vector` worker)
+```python
+text  = f"{title}. {description or ''}"
+meta  = {"book_id": book_id}
+```
+Example:
+```text
+The Wild Robot. Can a robot survive alone on a remote, wild island?
+meta = {"book_id": "B378"}
+```
+
+### Query-enhanced semantic search (runtime)
+```python
+enhanced_query = f"{query} for student who likes {', '.join(context_parts)}"
+vector = OpenAIEmbeddings.embed_query(enhanced_query)
+```
+For a 4th-grader who enjoys fantasy:
+```text
+"dragon stories for student who likes fantasy and RL 4.2"
+```
+
+### Aggregated student-preference vector
+Weighted centroid of last _m_ rated-book embeddings:
+```python
+query_vector = np.sum(weighted_embeddings, axis=0) / total_weight
+```
+
+The FAISS index stores **only vectors + `book_id` metadata**—no PII is ever embedded.
+
+## **Scoring Weights (live defaults)**
+```
+reading_match_weight (α): 0.4  # Level proximity
+rating_boost_weight  (β): 0.3  # Semantic + rating boost
+social_boost_weight  (γ): 0.2  # Neighbour signals
+recency_weight       (δ): 0.1  # Exponential decay
+```
+These are hot-reloaded from `weights.json`, so PMs can tune without redeploying.
+
 ## API Interface Specification
 
 ### **Core Endpoints**

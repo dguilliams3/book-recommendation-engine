@@ -35,6 +35,7 @@ from .prompts import build_prompt, parser
 from .scoring import score_candidates
 from .candidate_builder import build_candidates
 from common.redis_utils import mark_recommended
+from common.reading_level_utils import get_student_reading_level_from_db
 
 logger = get_logger(__name__)
 
@@ -230,6 +231,29 @@ async def generate_recommendations(
 
             avg_level, recent_titles, top_genres, band_hist = await _student_context()
 
+            # --- EDGE CASE FIX: Get reading level for new students ---
+            # This enables the α-term (reading_match) in scoring which is critical for quality
+            if avg_level is None:
+                try:
+                    async with engine.begin() as conn:
+                        # Convert engine to asyncpg pool-like interface
+                        from asyncpg import create_pool
+                        pool_url = str(S.db_url).replace("postgresql://", "postgresql://").replace("postgresql+asyncpg://", "postgresql://")
+                        pool = await create_pool(pool_url, min_size=1, max_size=1)
+                        try:
+                            rl_info = await get_student_reading_level_from_db(student_id, pool)
+                            avg_level = rl_info.get("avg_reading_level")
+                            logger.debug("Fetched reading level for new student", extra={
+                                "student_id": student_id, 
+                                "reading_level": avg_level,
+                                "method": rl_info.get("method")
+                            })
+                        finally:
+                            await pool.close()
+                except Exception:
+                    logger.warning("Failed to compute reading level for new student", exc_info=True)
+                    avg_level = 4.0  # Safe fallback to 4th grade level
+
             # Build human-readable context string for the LLM
             ctx_parts: list[str] = []
             ctx_parts.append("Student average RL: " + (f"{avg_level}" if avg_level else "unknown"))
@@ -240,6 +264,9 @@ async def generate_recommendations(
             if band_hist:
                 band_str = ", ".join(f"{b}:{cnt}" for b, cnt in band_hist.items())
                 ctx_parts.append("Difficulty bands: " + band_str)
+            # Include search keywords if provided
+            if query and query.strip():
+                ctx_parts.append("Search keywords: " + query.strip())
 
             context_line = "; ".join(ctx_parts) + "\n"
 
@@ -261,7 +288,76 @@ async def generate_recommendations(
             except Exception:
                 logger.warning("Candidate builder failed, falling back to empty list", exc_info=True)
                 candidates = []
-            ranked = score_candidates(candidates)[: n * 2]
+            
+            # --- EDGE CASE FIX: Populate student_level for scoring ---
+            # This enables the α-term (reading_match_weight) which is crucial for quality
+            for cand in candidates:
+                cand["student_level"] = avg_level
+            
+            ranked_scores = score_candidates(candidates)
+            ranked = ranked_scores[: n * 2]
+
+            # --- EDGE CASE FIX: Ensure we always have candidates ---
+            if not ranked:
+                logger.warning("No ranked candidates available, using popular fallback", extra={"student_id": student_id})
+                try:
+                    # Get popular books as emergency fallback
+                    async with engine.begin() as conn:
+                        fallback_rows = await conn.execute(
+                            text("""
+                                SELECT book_id, title, author, reading_level
+                                FROM catalog
+                                ORDER BY RANDOM()  -- In production, use actual popularity metric
+                                LIMIT :limit
+                            """),
+                            {"limit": n * 2}
+                        )
+                        for row in fallback_rows:
+                            fallback_cand = {
+                                "book_id": row[0],
+                                "title": row[1], 
+                                "author": row[2],
+                                "level": row[3],
+                                "student_level": avg_level,
+                                "neighbour_recent": 0,
+                                "staff_pick": False,
+                                "semantic_candidate": False
+                            }
+                            ranked.append((0.1, fallback_cand))  # Low score fallback
+                except Exception:
+                    logger.error("Even fallback candidate generation failed", exc_info=True)
+
+            # --- Enrich metadata for ranked candidates ----------------------
+            try:
+                needed_ids = [c[1]["book_id"] for c in ranked]
+                async with engine.begin() as conn:
+                    if needed_ids:
+                        rows_meta = await conn.execute(
+                            text("SELECT book_id, title, author, reading_level FROM catalog WHERE book_id = ANY(:ids)"),
+                            {"ids": needed_ids},
+                        )
+                        meta_map = {r[0]: r for r in rows_meta}
+
+                missing_title_cnt = 0
+                for _score, cand in ranked:
+                    meta = meta_map.get(cand["book_id"]) if 'meta_map' in locals() else None
+                    if meta:
+                        if not cand.get("title"):
+                            cand["title"] = meta[1]
+                        if not cand.get("author"):
+                            cand["author"] = meta[2]
+                        if cand.get("level") is None:
+                            cand["level"] = meta[3]
+                    if not cand.get("title"):
+                        missing_title_cnt += 1
+
+                logger.debug("Ranked candidate metadata enriched", extra={
+                    "student_id": student_id,
+                    "ranked_count": len(ranked),
+                    "missing_title_count": missing_title_cnt,
+                })
+            except Exception:
+                logger.debug("Metadata enrichment for ranked candidates failed", exc_info=True)
 
             logger.info(
                 "Candidates ranked",
@@ -292,7 +388,36 @@ async def generate_recommendations(
             prompt_messages = build_prompt(raw_user_prompt)
 
             callback = MetricCallbackHandler()
-            ai_msg, _unused = await _ask_agent(agent, prompt_messages, callbacks=[callback])
+            
+            # --- EDGE CASE FIX: Guard agent calls ---
+            try:
+                ai_msg, _unused = await _ask_agent(agent, prompt_messages, callbacks=[callback])
+            except Exception as e:
+                logger.error("LLM agent call failed, using fallback recommendations", exc_info=True, extra={
+                    "student_id": student_id,
+                    "request_id": request_id,
+                    "error": str(e)
+                })
+                # Return top-ranked candidates as fallback
+                fallback_recommendations = []
+                for _score, cand in ranked[:n]:
+                    fallback_recommendations.append(BookRecommendation(
+                        book_id=cand["book_id"],
+                        title=cand.get("title", "Unknown Title"),
+                        author=cand.get("author", "Unknown Author"), 
+                        reading_level=cand.get("level", avg_level or 4.0),
+                        librarian_blurb="Recommended based on your reading preferences. LLM service temporarily unavailable.",
+                        justification=f"Selected from top candidates (score: {_score:.2f})"
+                    ))
+                
+                return fallback_recommendations, {
+                    "agent_duration": time.perf_counter() - start_ts,
+                    "tool_count": 0,
+                    "tools": [],
+                    "error_count": 1,
+                    "error": "llm_failure",
+                    "fallback_used": True
+                }
 
     duration = time.perf_counter() - start_ts
 
@@ -404,6 +529,42 @@ async def generate_recommendations(
                     justification="",
                 )
             ]
+
+    # --- EDGE CASE FIX: Ensure we return exactly n recommendations ---
+    if len(recommendations) < n:
+        logger.info("Top-up needed for recommendations", extra={
+            "received": len(recommendations),
+            "target": n,
+            "student_id": student_id
+        })
+        
+        # Use remaining ranked candidates to fill the gap
+        used_book_ids = {rec.book_id for rec in recommendations}
+        for _score, cand in ranked:
+            if len(recommendations) >= n:
+                break
+            if cand["book_id"] not in used_book_ids:
+                # Fetch metadata for top-up candidate
+                try:
+                    async with engine.begin() as conn:
+                        meta_row = await conn.execute(
+                            text("SELECT title, author, reading_level FROM catalog WHERE book_id = :book_id"),
+                            {"book_id": cand["book_id"]}
+                        )
+                        meta = meta_row.fetchone() if meta_row else None
+                        
+                    recommendations.append(BookRecommendation(
+                        book_id=cand["book_id"],
+                        title=meta[0] if meta else cand.get("title", "Unknown Title"),
+                        author=meta[1] if meta else cand.get("author", "Unknown Author"),
+                        reading_level=meta[2] if meta else cand.get("level", avg_level or 4.0),
+                        librarian_blurb="Additional recommendation based on your reading profile.",
+                        justification=f"Top-up candidate (score: {_score:.2f})"
+                    ))
+                    used_book_ids.add(cand["book_id"])
+                except Exception:
+                    logger.debug("Failed to fetch metadata for top-up candidate", extra={"book_id": cand["book_id"]})
+                    continue
 
     meta = {
         "agent_duration": duration,

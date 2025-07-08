@@ -134,6 +134,7 @@ services:
       - .env
     volumes:
       - ./data:/app/data
+      - ./logs:/app/logs:ro
     ports:
       - "8501:8501"
     depends_on: [recommendation_api]
@@ -208,7 +209,11 @@ services:
       - ./data:/app/data
     environment:
       - OPENAI_API_KEY
-    depends_on: [postgres]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
 
 
   # Generates and updates vector embeddings for books when catalog change events are received.
