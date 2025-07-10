@@ -9,7 +9,7 @@ from typing import List, Dict, Any
 # Add src to Python path so we can find the common module when run directly
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from common import SettingsInstance as S
+from common.settings import settings as S
 from common.structured_logging import get_logger
 from common.tools import readability_formula_estimator
 from common.events import BookUpdatedEvent, BOOK_EVENTS_TOPIC

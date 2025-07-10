@@ -30,7 +30,7 @@ from pathlib import Path
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 
-from common import SettingsInstance as S
+from common.settings import settings as S
 from common.structured_logging import get_logger
 from .scoring import CandidateBook
 from common.redis_utils import was_recommended

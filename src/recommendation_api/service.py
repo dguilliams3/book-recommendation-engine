@@ -35,7 +35,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy import text
 
-from common import SettingsInstance as S
+from common.settings import settings as S
 from common.structured_logging import get_logger
 from common.performance import (
     cached, performance_context, get_cache, get_connection_pool,

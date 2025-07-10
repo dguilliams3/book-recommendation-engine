@@ -1,13 +1,12 @@
 """
 Shared utilities for the Book‑Recommendation Platform.
-Keeps import surface small: `from common import settings, models`.
+Import surface: `from common import settings, models`.
+For settings, always import directly from `common.settings` for reliability.
 """
-from .settings import Settings, SettingsInstance, SettingsInstance as S, settings
+from .settings import settings
 from . import models
+
 __all__ = [
-    "Settings",
-    "S",
     "settings",
     "models",
-    "SettingsInstance",
 ] 

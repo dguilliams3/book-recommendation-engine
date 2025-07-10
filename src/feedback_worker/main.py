@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from common.settings import SettingsInstance as S
+from common.settings import settings as S
 from common.structured_logging import get_logger
 from common.kafka_utils import KafkaEventConsumer
 from common.events import FeedbackEvent, FEEDBACK_EVENTS_TOPIC

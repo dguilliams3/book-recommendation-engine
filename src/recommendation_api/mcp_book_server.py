@@ -18,7 +18,7 @@ from typing import List
 from fastmcp import FastMCP
 from asyncio_throttle import Throttler
 
-from common import SettingsInstance as S
+from common.settings import settings as S
 from common.structured_logging import get_logger
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS

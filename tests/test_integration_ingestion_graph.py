@@ -8,7 +8,7 @@ from testcontainers.postgres import PostgresContainer
 
 # Patch targets -----------------------------------------------------------------
 import common.kafka_utils as kafka_utils
-from common.settings import SettingsInstance as S
+from common.settings import settings as S
 from langchain_openai import OpenAIEmbeddings
 
 from ingestion_service.pipeline import run_ingestion

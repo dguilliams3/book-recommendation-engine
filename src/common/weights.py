@@ -10,7 +10,7 @@ import json, threading, time
 from pathlib import Path
 from typing import Any, Dict
 
-from . import SettingsInstance as S
+from .settings import settings as S
 
 _DEFAULT_WEIGHTS: Dict[str, Any] = {
     "reading_match": 1.0,

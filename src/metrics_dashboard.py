@@ -8,7 +8,7 @@ import asyncio
 import json
 from datetime import datetime
 from aiokafka import AIOKafkaConsumer
-from common import SettingsInstance as S
+from common.settings import settings as S
 
 async def dashboard():
     print("📊 METRICS DASHBOARD")

@@ -11,7 +11,7 @@ from alembic import context
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import our settings and models
-from common.settings import SettingsInstance as S
+from common.settings import settings as S
 from common.models import Base  # Import existing SQLAlchemy models
 
 # this is the Alembic Config object, which provides
