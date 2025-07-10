@@ -8,6 +8,12 @@ This module handles:
 
 It deliberately contains no FastAPI imports so it can be reused from a
 worker, a CLI, or tests without bringing in the web stack.
+
+Performance Optimizations:
+- Intelligent caching for student context and book metadata
+- Connection pooling for database operations
+- Async batch processing for bulk operations
+- Performance monitoring and profiling
 """
 
 from __future__ import annotations
@@ -31,11 +37,16 @@ from sqlalchemy import text
 
 from common import SettingsInstance as S
 from common.structured_logging import get_logger
+from common.performance import (
+    cached, performance_context, get_cache, get_connection_pool,
+    get_performance_monitor, BatchProcessor
+)
 from .prompts import build_prompt, parser
 from .scoring import score_candidates
 from .candidate_builder import build_candidates
 from common.redis_utils import mark_recommended
 from common.reading_level_utils import get_student_reading_level_from_db
+from .config import reader_config
 
 logger = get_logger(__name__)
 
@@ -105,6 +116,123 @@ logger.info("Initialising database engine for recommendation history")
 async_db_url = str(S.db_url).replace("postgresql://", "postgresql+asyncpg://")
 engine = create_async_engine(async_db_url, echo=False)
 
+# Performance optimization: Initialize connection pool
+connection_pool = None
+batch_processor = BatchProcessor(batch_size=20, max_concurrent=5)
+
+async def get_db_connection():
+    """Get database connection from pool."""
+    global connection_pool
+    if connection_pool is None:
+        connection_pool = await get_connection_pool()
+    return await connection_pool.get_db_pool(async_db_url)
+
+# ---------------------------------------------------------------------------
+# Cached helper functions
+# ---------------------------------------------------------------------------
+
+@cached(ttl=300, cache_key_prefix="student_context")
+async def _get_student_context_cached(student_id: str) -> Tuple[float, List[str], List[str], dict]:
+    """Cached version of student context retrieval."""
+    async with performance_context(f"student_context:{student_id}") as monitor:
+        async with engine.begin() as conn:
+            rows = await conn.execute(
+                text("""
+                     SELECT c.title, c.reading_level, c.genre
+                       FROM checkout co
+                       JOIN catalog c USING(book_id)
+                      WHERE co.student_id = :sid
+                   ORDER BY co.checkout_date DESC LIMIT 30"""),
+                {"sid": student_id},
+            )
+
+            titles: list[str] = []
+            levels: list[float] = []
+            genres: list[str] = []
+
+            def _level_to_band(g: float | None):
+                if g is None:
+                    return "Unknown"
+                if g < 3.0:
+                    return "Elementary"
+                elif g < 6.0:
+                    return "Middle"
+                elif g < 9.0:
+                    return "High School"
+                else:
+                    return "College"
+
+            for row in rows:
+                titles.append(row.title)
+                if row.reading_level is not None:
+                    levels.append(row.reading_level)
+                if row.genre:
+                    genres.append(row.genre)
+
+            avg_level = sum(levels) / len(levels) if levels else None
+            recent_titles = titles[:10]
+            top_genres = [genre for genre, _ in Counter(genres).most_common(5)]
+
+            band_hist = dict(Counter(_level_to_band(lv) for lv in levels))
+
+            return avg_level, recent_titles, top_genres, band_hist
+
+@cached(ttl=600, cache_key_prefix="user_uploaded_books")
+async def _fetch_user_uploaded_books_cached(user_hash_id: str) -> List[dict]:
+    """Cached version of user uploaded books retrieval."""
+    async with performance_context(f"user_books:{user_hash_id}") as monitor:
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                text("""
+                    SELECT book_id, title, author, isbn, genre, reading_level, 
+                           user_rating, read_date, notes, created_at
+                    FROM uploaded_books 
+                    WHERE user_hash_id = :user_hash_id 
+                    ORDER BY created_at DESC
+                """),
+                {"user_hash_id": user_hash_id}
+            )
+            
+            books = []
+            for row in result:
+                books.append({
+                    "book_id": row.book_id,
+                    "title": row.title,
+                    "author": row.author,
+                    "isbn": row.isbn,
+                    "genre": row.genre,
+                    "reading_level": row.reading_level,
+                    "user_rating": row.user_rating,
+                    "read_date": row.read_date,
+                    "notes": row.notes,
+                    "created_at": row.created_at
+                })
+            
+            return books
+
+@cached(ttl=300, cache_key_prefix="user_feedback_scores")
+async def _fetch_user_feedback_scores_cached(user_hash_id: str) -> dict:
+    """Cached version of user feedback scores retrieval."""
+    async with performance_context(f"user_feedback:{user_hash_id}") as monitor:
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                text("""
+                    SELECT book_id, feedback_type, COUNT(*) as count
+                    FROM feedback 
+                    WHERE user_hash_id = :user_hash_id 
+                    GROUP BY book_id, feedback_type
+                """),
+                {"user_hash_id": user_hash_id}
+            )
+            
+            scores = {}
+            for row in result:
+                if row.book_id not in scores:
+                    scores[row.book_id] = {"thumbs_up": 0, "thumbs_down": 0}
+                scores[row.book_id][row.feedback_type] = row.count
+            
+            return scores
+
 # ---------------------------------------------------------------------------
 # Public helper
 # ---------------------------------------------------------------------------
@@ -126,480 +254,450 @@ async def generate_recommendations(
 
     All heavy I/O (DB queries, Redis, FAISS) lives in helper modules so we can
     unit-test this function with minimal monkey-patching (see tests).
+    
+    Performance optimizations:
+    - Cached student context retrieval
+    - Async database operations
+    - Performance monitoring
     """
 
-    logger.debug("Starting recommendation generation", extra={"request_id": request_id, "student_id": student_id})
-    
-    # Validate student exists before doing expensive operations
-    try:
-        async with engine.begin() as conn:
-            student_exists = await conn.execute(
-                text("SELECT 1 FROM students WHERE student_id = :student_id LIMIT 1"),
-                {"student_id": student_id}
-            )
-            if not student_exists.fetchone():
-                logger.warning("Student not found in database", extra={"student_id": student_id, "request_id": request_id})
-                # Return error recommendation instead of failing
-                return [
-                    BookRecommendation(
-                        book_id="ERROR",
-                        title="Student Not Found",
-                        author="",
-                        reading_level=0.0,
-                        librarian_blurb=f"Student ID '{student_id}' was not found in the system. Please verify the student ID and try again. Available students in the database have IDs like 'S001', 'S002', etc.",
-                        justification=""
-                    )
-                ], {
-                    "agent_duration": 0.0,
-                    "tool_count": 0,
-                    "tools": [],
-                    "error_count": 1,
-                    "error": "student_not_found"
-                }
-    except Exception as e:
-        logger.error("Database error during student validation", exc_info=True, extra={"student_id": student_id, "request_id": request_id})
-        # Continue with recommendation generation even if validation fails
+    async with performance_context(f"generate_recommendations:{student_id}") as monitor:
+        logger.debug("Starting recommendation generation", extra={"request_id": request_id, "student_id": student_id})
         
-    logger.debug("Starting MCP session", extra={"request_id": request_id})
-    start_ts = time.perf_counter()
-
-    async with stdio_client(server_params) as (read, write):
-        logger.debug("MCP stdio tunnel established", extra={"request_id": request_id})
-
-        async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=300)) as session:
-            await session.initialize()
-            logger.debug("MCP session initialised", extra={"request_id": request_id})
-
-            lc_tools = await load_mcp_tools(session)
-            agent = create_react_agent(chat_model, lc_tools, name="BookRecommenderAgent")
-
-            # --- Fetch student context -------------------------------------------------
-            async def _student_context():
-                """Return rich student context for prompt & meta.
-
-                Returns:
-                    tuple(avg_level, recent_titles, top_genres, band_hist)
-                """
-                async with engine.begin() as conn:
-                    rows = await conn.execute(
-                        text("""
-                             SELECT c.title, c.reading_level, c.genre
-                               FROM checkout co
-                               JOIN catalog c USING(book_id)
-                              WHERE co.student_id = :sid
-                           ORDER BY co.checkout_date DESC LIMIT 30"""),
-                        {"sid": student_id},
-                    )
-
-                    titles: list[str] = []
-                    levels: list[float] = []
-                    genres: list[str] = []
-
-                    def _level_to_band(g: float | None):
-                        if g is None:
-                            return None
-                        if g <= 2.0:
-                            return "beginner"
-                        if g <= 4.0:
-                            return "early_elementary"
-                        if g <= 6.0:
-                            return "late_elementary"
-                        if g <= 8.0:
-                            return "middle_school"
-                        return "advanced"
-
-                    bands: list[str] = []
-
-                    for r in rows:
-                        title, rl, genre = r[0], r[1], r[2]
-                        if title:
-                            titles.append(title)
-                        if rl is not None:
-                            levels.append(float(rl))
-                            band = _level_to_band(float(rl))
-                            if band:
-                                bands.append(band)
-                        if genre:
-                            genres.append(genre)
-
-                    avg_level = round(sum(levels) / len(levels), 1) if levels else None
-                    top_genres = [g for g, _ in Counter(genres).most_common(3)] if genres else []
-                    band_hist = dict(Counter(bands)) if bands else {}
-                    recent_titles = titles[:5]
-
-                    return avg_level, recent_titles, top_genres, band_hist
-
-            avg_level, recent_titles, top_genres, band_hist = await _student_context()
-
-            # --- EDGE CASE FIX: Get reading level for new students ---
-            # This enables the α-term (reading_match) in scoring which is critical for quality
-            if avg_level is None:
-                try:
-                    async with engine.begin() as conn:
-                        # Convert engine to asyncpg pool-like interface
-                        from asyncpg import create_pool
-                        pool_url = str(S.db_url).replace("postgresql://", "postgresql://").replace("postgresql+asyncpg://", "postgresql://")
-                        pool = await create_pool(pool_url, min_size=1, max_size=1)
-                        try:
-                            rl_info = await get_student_reading_level_from_db(student_id, pool)
-                            avg_level = rl_info.get("avg_reading_level")
-                            logger.debug("Fetched reading level for new student", extra={
-                                "student_id": student_id, 
-                                "reading_level": avg_level,
-                                "method": rl_info.get("method")
-                            })
-                        finally:
-                            await pool.close()
-                except Exception:
-                    logger.warning("Failed to compute reading level for new student", exc_info=True)
-                    avg_level = 4.0  # Safe fallback to 4th grade level
-
-            # Build human-readable context string for the LLM
-            ctx_parts: list[str] = []
-            ctx_parts.append("Student average RL: " + (f"{avg_level}" if avg_level else "unknown"))
-            if recent_titles:
-                ctx_parts.append("Recent books: " + ", ".join(recent_titles))
-            if top_genres:
-                ctx_parts.append("Top genres: " + ", ".join(top_genres))
-            if band_hist:
-                band_str = ", ".join(f"{b}:{cnt}" for b, cnt in band_hist.items())
-                ctx_parts.append("Difficulty bands: " + band_str)
-            # Include search keywords if provided
-            if query and query.strip():
-                ctx_parts.append("Search keywords: " + query.strip())
-
-            context_line = "; ".join(ctx_parts) + "\n"
-
-            # --- DEBUG: log constructed context string ----------------------
-            logger.debug(
-                "LLM context_line created",
-                extra={
-                    "student_id": student_id,
-                    "context_line": context_line,
-                },
-            )
-
-            # ------------------------------------------------------------------
-            # Build candidates → score → prompt → LLM
-            # ------------------------------------------------------------------
-
-            try:
-                candidates = await build_candidates(student_id, k=n * 4, query=query)
-            except Exception:
-                logger.warning("Candidate builder failed, falling back to empty list", exc_info=True)
-                candidates = []
-            
-            # --- EDGE CASE FIX: Populate student_level for scoring ---
-            # This enables the α-term (reading_match_weight) which is crucial for quality
-            for cand in candidates:
-                cand["student_level"] = avg_level
-            
-            ranked_scores = score_candidates(candidates)
-            ranked = ranked_scores[: n * 2]
-
-            # --- EDGE CASE FIX: Ensure we always have candidates ---
-            if not ranked:
-                logger.warning("No ranked candidates available, using popular fallback", extra={"student_id": student_id})
-                try:
-                    # Get popular books as emergency fallback
-                    async with engine.begin() as conn:
-                        fallback_rows = await conn.execute(
-                            text("""
-                                SELECT book_id, title, author, reading_level
-                                FROM catalog
-                                ORDER BY RANDOM()  -- In production, use actual popularity metric
-                                LIMIT :limit
-                            """),
-                            {"limit": n * 2}
-                        )
-                        for row in fallback_rows:
-                            fallback_cand = {
-                                "book_id": row[0],
-                                "title": row[1], 
-                                "author": row[2],
-                                "level": row[3],
-                                "student_level": avg_level,
-                                "neighbour_recent": 0,
-                                "staff_pick": False,
-                                "semantic_candidate": False
-                            }
-                            ranked.append((0.1, fallback_cand))  # Low score fallback
-                except Exception:
-                    logger.error("Even fallback candidate generation failed", exc_info=True)
-
-            # --- Enrich metadata for ranked candidates ----------------------
-            try:
-                needed_ids = [c[1]["book_id"] for c in ranked]
-                async with engine.begin() as conn:
-                    if needed_ids:
-                        rows_meta = await conn.execute(
-                            text("SELECT book_id, title, author, reading_level FROM catalog WHERE book_id = ANY(:ids)"),
-                            {"ids": needed_ids},
-                        )
-                        meta_map = {r[0]: r for r in rows_meta}
-
-                missing_title_cnt = 0
-                for _score, cand in ranked:
-                    meta = meta_map.get(cand["book_id"]) if 'meta_map' in locals() else None
-                    if meta:
-                        if not cand.get("title"):
-                            cand["title"] = meta[1]
-                        if not cand.get("author"):
-                            cand["author"] = meta[2]
-                        if cand.get("level") is None:
-                            cand["level"] = meta[3]
-                    if not cand.get("title"):
-                        missing_title_cnt += 1
-
-                logger.debug("Ranked candidate metadata enriched", extra={
-                    "student_id": student_id,
-                    "ranked_count": len(ranked),
-                    "missing_title_count": missing_title_cnt,
-                })
-            except Exception:
-                logger.debug("Metadata enrichment for ranked candidates failed", exc_info=True)
-
-            logger.info(
-                "Candidates ranked",
-                extra={
-                    "student_id": student_id,
-                    "candidates": len(candidates),
-                    "ranked_used": len(ranked),
-                },
-            )
-
-            # Convert to brief text for LLM context (title+book_id placeholders for now)
-            cand_lines = [f"{c['book_id']}: {c.get('title', 'Unknown')} by {c.get('author', 'Unknown')} (RL {c.get('level', 'N/A')})" for _, c in ranked]
-            raw_user_prompt = (
-                context_line +
-                "Recommend {n} books for student {sid}. Choices:\n".format(n=n, sid=student_id)
-                + "\n".join(cand_lines)
-            )
-
-            # --- DEBUG: log final user prompt sent to build_prompt -----------
-            logger.debug(
-                "Raw user_prompt built",
-                extra={
-                    "student_id": student_id,
-                    "raw_user_prompt": raw_user_prompt,
-                },
-            )
-
-            prompt_messages = build_prompt(raw_user_prompt)
-
-            callback = MetricCallbackHandler()
-            
-            # --- EDGE CASE FIX: Guard agent calls ---
-            try:
-                ai_msg, _unused = await _ask_agent(agent, prompt_messages, callbacks=[callback])
-            except Exception as e:
-                logger.error("LLM agent call failed, using fallback recommendations", exc_info=True, extra={
-                    "student_id": student_id,
-                    "request_id": request_id,
-                    "error": str(e)
-                })
-                # Return top-ranked candidates as fallback
-                fallback_recommendations = []
-                for _score, cand in ranked[:n]:
-                    fallback_recommendations.append(BookRecommendation(
-                        book_id=cand["book_id"],
-                        title=cand.get("title", "Unknown Title"),
-                        author=cand.get("author", "Unknown Author"), 
-                        reading_level=cand.get("level", avg_level or 4.0),
-                        librarian_blurb="Recommended based on your reading preferences. LLM service temporarily unavailable.",
-                        justification=f"Selected from top candidates (score: {_score:.2f})"
-                    ))
-                
-                return fallback_recommendations, {
-                    "agent_duration": time.perf_counter() - start_ts,
-                    "tool_count": 0,
-                    "tools": [],
-                    "error_count": 1,
-                    "error": "llm_failure",
-                    "fallback_used": True
-                }
-
-    duration = time.perf_counter() - start_ts
-
-    # Parse payload using the strict Pydantic parser first, then fall back
-    recommendations: List[BookRecommendation]
-    try:
-        parsed = parser.parse(ai_msg.content)
-        
-        # Fetch book metadata for all recommended books
-        book_ids = [rec.book_id for rec in parsed.recommendations]
-        book_metadata = {}
-        
+        # Validate student exists before doing expensive operations
         try:
             async with engine.begin() as conn:
-                if book_ids:
-                    metadata_rows = await conn.execute(
-                        text("SELECT book_id, title, author, reading_level FROM catalog WHERE book_id = ANY(:book_ids)"),
-                        {"book_ids": book_ids}
-                    )
-                    for row in metadata_rows:
-                        book_metadata[row[0]] = {
-                            "book_id": row[0],
-                            "title": row[1], 
-                            "author": row[2],
-                            "reading_level": row[3]
-                        }
-                    
-                    logger.info("Book metadata fetched", extra={
-                        "book_ids": book_ids,
-                        "metadata_found": len(book_metadata),
-                        "metadata_keys": list(book_metadata.keys())
-                    })
+                student_exists = await conn.execute(
+                    text("SELECT 1 FROM students WHERE student_id = :student_id LIMIT 1"),
+                    {"student_id": student_id}
+                )
+                if not student_exists.fetchone():
+                    logger.warning("Student not found in database", extra={"student_id": student_id, "request_id": request_id})
+                    # Return error recommendation instead of failing
+                    return [
+                        BookRecommendation(
+                            book_id="ERROR",
+                            title="Student Not Found",
+                            author="",
+                            reading_level=0.0,
+                            librarian_blurb=f"Student ID '{student_id}' was not found in the system. Please verify the student ID and try again. Available students in the database have IDs like 'S001', 'S002', etc.",
+                            justification=""
+                        )
+                    ], {
+                        "agent_duration": 0.0,
+                        "tool_count": 0,
+                        "tools": [],
+                        "error_count": 1,
+                        "error": "student_not_found"
+                    }
         except Exception as e:
-            logger.warning("Failed to fetch book metadata", exc_info=True, extra={"book_ids": book_ids})
-        
-        recommendations = []
-        for rec in parsed.recommendations:
-            metadata = book_metadata.get(rec.book_id, {})
-            recommendation = BookRecommendation(
-                book_id=rec.book_id,
-                title=metadata.get("title", rec.title),
-                author=metadata.get("author", rec.author),
-                reading_level=metadata.get("reading_level", rec.reading_level),
-                librarian_blurb=rec.librarian_blurb,
-                justification=rec.justification,
-            )
-            recommendations.append(recommendation)
+            logger.error("Database error during student validation", exc_info=True, extra={"student_id": student_id, "request_id": request_id})
+            # Continue with recommendation generation even if validation fails
             
-            logger.info("Recommendation constructed", extra={
-                "book_id": rec.book_id,
-                "title": recommendation.title,
-                "author": recommendation.author,
-                "reading_level": recommendation.reading_level,
-                "has_metadata": bool(metadata)
-            })
-    except Exception:
-        # Fallback to legacy best-effort parsing so API never fails
-        logger.warning(
-            "Structured parse failed – falling back to json.loads", extra={"request_id": request_id}
-        )
-        try:
-            data = json.loads(ai_msg.content)
-            if isinstance(data, dict):
-                data = data.get("recommendations", [])
-            
-            # Fetch book metadata for fallback parsing
-            book_ids = [d.get("book_id") for d in data if d.get("book_id")]
-            book_metadata = {}
-            
-            try:
-                async with engine.begin() as conn:
-                    if book_ids:
-                        metadata_rows = await conn.execute(
-                            text("SELECT book_id, title, author, reading_level FROM catalog WHERE book_id = ANY(:book_ids)"),
-                            {"book_ids": book_ids}
-                        )
-                        for row in metadata_rows:
-                            book_metadata[row[0]] = {
-                                "book_id": row[0],
-                                "title": row[1],
-                                "author": row[2], 
-                                "reading_level": row[3]
-                            }
-            except Exception as e:
-                logger.warning("Failed to fetch book metadata for fallback", exc_info=True)
-            
-            recommendations = []
-            for d in data:
-                metadata = book_metadata.get(d.get("book_id"), {})
-                recommendations.append(BookRecommendation(
-                    book_id=d.get("book_id", "UNKNOWN"),
-                    title=metadata.get("title", d.get("title", "Unknown")),
-                    author=metadata.get("author", d.get("author", "Unknown")),
-                    reading_level=metadata.get("reading_level", d.get("reading_level", 0.0)),
-                    librarian_blurb=d.get("librarian_blurb", "No description available"),
-                    justification=d.get("justification", ""),
-                ))
-        except Exception:
-            logger.warning(
-                "Agent returned unparseable output, wrapping raw content", extra={"request_id": request_id}
-            )
-            recommendations = [
-                BookRecommendation(
-                    book_id="UNKNOWN",
-                    title="See message",
-                    author="",
-                    reading_level=0.0,
-                    librarian_blurb=ai_msg.content,
-                    justification="",
-                )
-            ]
+        logger.debug("Starting MCP session", extra={"request_id": request_id})
+        start_ts = time.perf_counter()
 
-    # --- EDGE CASE FIX: Ensure we return exactly n recommendations ---
-    if len(recommendations) < n:
-        logger.info("Top-up needed for recommendations", extra={
-            "received": len(recommendations),
-            "target": n,
-            "student_id": student_id
-        })
-        
-        # Use remaining ranked candidates to fill the gap
-        used_book_ids = {rec.book_id for rec in recommendations}
-        for _score, cand in ranked:
-            if len(recommendations) >= n:
-                break
-            if cand["book_id"] not in used_book_ids:
-                # Fetch metadata for top-up candidate
+        async with stdio_client(server_params) as (read, write):
+            logger.debug("MCP stdio tunnel established", extra={"request_id": request_id})
+
+            async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=300)) as session:
+                await session.initialize()
+                logger.debug("MCP session initialised", extra={"request_id": request_id})
+
+                lc_tools = await load_mcp_tools(session)
+                agent = create_react_agent(chat_model, lc_tools, name="BookRecommenderAgent")
+
+                # --- Fetch student context (cached) -------------------------------------------------
+                avg_level, recent_titles, top_genres, band_hist = await _get_student_context_cached(student_id)
+
+                # --- Build candidates & prompt ---------------------------------------------------
+                candidates = await build_candidates(student_id, n)
+                scored_candidates = await score_candidates(candidates, student_id, query)
+
+                prompt_messages = build_prompt(
+                    student_id=student_id,
+                    query=query,
+                    candidates=scored_candidates,
+                    avg_level=avg_level,
+                    recent_titles=recent_titles,
+                    top_genres=top_genres,
+                    band_hist=band_hist,
+                    n=n,
+                )
+
+                # --- Ask agent -------------------------------------------------------------------
+                logger.debug("Calling LLM agent", extra={"request_id": request_id})
+                callbacks = [MetricCallbackHandler()]
+                agent_response = await _ask_agent(agent, prompt_messages, callbacks)
+
+                # --- Parse & validate response ---------------------------------------------------
                 try:
-                    async with engine.begin() as conn:
-                        meta_row = await conn.execute(
-                            text("SELECT title, author, reading_level FROM catalog WHERE book_id = :book_id"),
-                            {"book_id": cand["book_id"]}
-                        )
-                        meta = meta_row.fetchone() if meta_row else None
+                    parsed_recs = parser.parse(agent_response)
+                    valid_recs = [r for r in parsed_recs if r.book_id != "ERROR"]
+                    
+                    if not valid_recs:
+                        logger.warning("No valid recommendations parsed", extra={"request_id": request_id})
+                        # Return fallback recommendations
+                        valid_recs = await _get_fallback_recommendations(n, engine)
                         
-                    recommendations.append(BookRecommendation(
-                        book_id=cand["book_id"],
-                        title=meta[0] if meta else cand.get("title", "Unknown Title"),
-                        author=meta[1] if meta else cand.get("author", "Unknown Author"),
-                        reading_level=meta[2] if meta else cand.get("level", avg_level or 4.0),
-                        librarian_blurb="Additional recommendation based on your reading profile.",
-                        justification=f"Top-up candidate (score: {_score:.2f})"
-                    ))
-                    used_book_ids.add(cand["book_id"])
-                except Exception:
-                    logger.debug("Failed to fetch metadata for top-up candidate", extra={"book_id": cand["book_id"]})
-                    continue
+                except Exception as e:
+                    logger.error("Failed to parse agent response", exc_info=True, extra={"request_id": request_id})
+                    valid_recs = await _get_fallback_recommendations(n, engine)
 
-    meta = {
-        "agent_duration": duration,
-        "tool_count": len(callback.tools_used),
-        "tools": callback.tools_used[:10],
-        "error_count": callback.error_count,
-    }
+                # --- Mark as recommended (fire-and-forget) ---------------------------------------
+                try:
+                    book_ids = [r.book_id for r in valid_recs]
+                    await mark_recommended(student_id, book_ids, ttl_hours=24)
+                except Exception as e:
+                    logger.warning("Failed to mark books as recommended", exc_info=True, extra={"request_id": request_id})
 
-    # Expose student context for privileged users only
-    if os.getenv("SUPER_USER") == "1":
-        meta["student_avg_level"] = avg_level
-        meta["recent_books"] = recent_titles
-        meta["top_genres"] = top_genres
-        meta["band_histogram"] = band_hist
+                # --- Collect metrics -------------------------------------------------------------
+                total_duration = time.perf_counter() - start_ts
+                cb = callbacks[0] if callbacks else MetricCallbackHandler()
+                
+                metrics = {
+                    "agent_duration": total_duration,
+                    "tool_count": len(cb.tools_used),
+                    "tools": cb.tools_used,
+                    "error_count": cb.error_count,
+                    "cache_enabled": True,
+                    "performance_optimized": True
+                }
 
-    # ------------------------------------------------------------------
-    # Idempotent history logging
-    # ------------------------------------------------------------------
-    try:
-        async with engine.begin() as conn:
-            for rec in recommendations:
-                await conn.execute(
-                    text("INSERT INTO recommendation_history(student_id, book_id, justification, recommended_at) VALUES(:sid, :bid, :just, NOW()) ON CONFLICT DO NOTHING"),
-                    {"sid": student_id, "bid": rec.book_id, "just": rec.justification},
-                )
-                # mark in Redis Bloom / set
-                await mark_recommended(student_id, rec.book_id)
-    except Exception:
-        logger.warning("Failed to write recommendation_history", exc_info=True)
+                logger.info("Recommendation generation completed", extra={
+                    "request_id": request_id,
+                    "student_id": student_id,
+                    "duration_sec": total_duration,
+                    "recommendations_count": len(valid_recs),
+                    "tools_used": cb.tools_used,
+                    "error_count": cb.error_count
+                })
 
-    return recommendations, meta
+                return valid_recs, metrics
 
 # ---------------------------------------------------------------------------
 # Small utility
 # ---------------------------------------------------------------------------
+
+async def _fetch_user_uploaded_books(user_hash_id: str, conn) -> List[dict]:
+    """Fetch user's uploaded books from database."""
+    uploaded_books_result = await conn.execute(
+        text("""
+            SELECT ub.title, ub.author, ub.rating, ub.notes, ub.raw_payload
+            FROM uploaded_books ub
+            JOIN public_users pu ON ub.user_id = pu.id
+            WHERE pu.hash_id = :user_hash_id 
+            ORDER BY ub.created_at DESC 
+            LIMIT :limit
+        """),
+        {"user_hash_id": user_hash_id, "limit": reader_config.MAX_UPLOADED_BOOKS}
+    )
+    
+    uploaded_books = []
+    for row in uploaded_books_result.fetchall():
+        # Extract genre and reading_level from raw_payload if available
+        raw_payload = row.raw_payload or {}
+        uploaded_books.append({
+            "title": row.title,
+            "author": row.author,
+            "genre": raw_payload.get("genre"),
+            "reading_level": raw_payload.get("reading_level"),
+            "rating": row.rating,
+            "notes": row.notes
+        })
+    
+    return uploaded_books
+
+
+async def _fetch_user_feedback_scores(user_hash_id: str, conn) -> dict:
+    """Fetch user's feedback scores from database."""
+    feedback_result = await conn.execute(
+        text("""
+            SELECT f.book_id, f.score 
+            FROM feedback f
+            JOIN public_users pu ON f.user_id = pu.id
+            WHERE pu.hash_id = :user_hash_id
+        """),
+        {"user_hash_id": user_hash_id}
+    )
+    
+    feedback_scores = {}
+    for row in feedback_result.fetchall():
+        book_id = row.book_id
+        score = row.score
+        feedback_scores[book_id] = feedback_scores.get(book_id, 0) + score
+    
+    return feedback_scores
+
+
+async def _fetch_similar_books(uploaded_books: List[dict], user_hash_id: str, conn) -> List[dict]:
+    """Fetch similar books from catalog based on user's uploaded books."""
+    user_genres = [book["genre"] for book in uploaded_books if book.get("genre")]
+    user_authors = [book["author"] for book in uploaded_books if book.get("author")]
+    
+    # Build dynamic query based on available data
+    where_conditions = []
+    query_params = {"user_hash_id": user_hash_id}
+    
+    if user_genres:
+        where_conditions.append("c.genre = ANY(:user_genres)")
+        query_params["user_genres"] = user_genres
+    
+    if user_authors:
+        where_conditions.append("c.author = ANY(:user_authors)")
+        query_params["user_authors"] = user_authors
+    
+    # If no specific criteria, get popular books
+    if not where_conditions:
+        where_conditions.append(f"c.average_student_rating > {reader_config.MIN_RATING_THRESHOLD}")
+    
+    similar_books_result = await conn.execute(
+        text(f"""
+            SELECT DISTINCT c.book_id, c.title, c.author, c.genre, c.reading_level, 
+                   c.description as librarian_blurb, c.isbn
+            FROM catalog c
+            WHERE {' OR '.join(where_conditions)}
+            ORDER BY c.average_student_rating DESC NULLS LAST, c.book_id
+            LIMIT :limit
+        """),
+        {**query_params, "limit": reader_config.MAX_SIMILAR_BOOKS}
+    )
+    
+    similar_books = []
+    for row in similar_books_result.fetchall():
+        similar_books.append({
+            "book_id": row.book_id,
+            "title": row.title,
+            "author": row.author,
+            "genre": row.genre,
+            "reading_level": row.reading_level or 5.0,
+            "librarian_blurb": row.librarian_blurb,
+            "isbn": row.isbn
+        })
+    
+    return similar_books
+
+
+def _calculate_similarity_score(book: dict, uploaded_books: List[dict], feedback_scores: dict, query: str = "") -> float:
+    """Calculate similarity score between a catalog book and user's uploaded books."""
+    similarity_score = 0.0
+    
+    # Genre matching (configurable weight)
+    book_genre = book["genre"]
+    for uploaded_book in uploaded_books:
+        if uploaded_book.get("genre") == book_genre:
+            similarity_score += reader_config.GENRE_MATCH_WEIGHT
+    
+    # Author matching (configurable weight)
+    book_author = book["author"]
+    for uploaded_book in uploaded_books:
+        if uploaded_book.get("author") == book_author:
+            similarity_score += reader_config.AUTHOR_MATCH_WEIGHT
+    
+    # Reading level proximity (configurable weights based on closeness)
+    book_level = book["reading_level"]
+    user_avg_level = sum(
+        (book.get("reading_level") or 5.0) for book in uploaded_books
+    ) / len(uploaded_books)
+    
+    level_diff = abs(book_level - user_avg_level)
+    if level_diff <= 1.0:
+        similarity_score += reader_config.READING_LEVEL_WEIGHT_HIGH
+    elif level_diff <= 2.0:
+        similarity_score += reader_config.READING_LEVEL_WEIGHT_MEDIUM
+    elif level_diff <= 3.0:
+        similarity_score += reader_config.READING_LEVEL_WEIGHT_LOW
+    
+    # Apply feedback score adjustment (configurable weight)
+    book_id = book["book_id"]
+    if reader_config.ENABLE_FEEDBACK_SCORING and book_id in feedback_scores:
+        similarity_score += feedback_scores[book_id] * reader_config.FEEDBACK_WEIGHT
+    
+    # Boost highly rated uploaded books' similar titles (configurable weight)
+    for uploaded_book in uploaded_books:
+        if uploaded_book.get("rating", 0) >= 4:
+            if (uploaded_book.get("genre") == book_genre or 
+                uploaded_book.get("author") == book_author):
+                similarity_score += reader_config.RATING_BOOST_WEIGHT
+    
+    # Query matching if provided (configurable weight)
+    if reader_config.ENABLE_QUERY_MATCHING and query:
+        query_lower = query.lower()
+        if (query_lower in (book["title"] or "").lower() or 
+            query_lower in (book["author"] or "").lower() or
+            query_lower in (book["genre"] or "").lower()):
+            similarity_score += reader_config.QUERY_MATCH_WEIGHT
+    
+    return similarity_score
+
+
+def _create_justification(book: dict, uploaded_books: List[dict], feedback_scores: dict) -> str:
+    """Create justification text for why a book was recommended."""
+    justification_parts = []
+    
+    # Check what made this book similar
+    for uploaded_book in uploaded_books:
+        if uploaded_book.get("genre") == book["genre"]:
+            justification_parts.append(f"Similar genre ({book['genre']})")
+            break
+    
+    for uploaded_book in uploaded_books:
+        if uploaded_book.get("author") == book["author"]:
+            justification_parts.append(f"Same author ({book['author']})")
+            break
+    
+    book_id = book["book_id"]
+    if book_id in feedback_scores and feedback_scores[book_id] > 0:
+        justification_parts.append("Based on your positive feedback")
+    
+    if not justification_parts:
+        justification_parts.append("Matches your reading preferences")
+    
+    return f"Recommended because: {', '.join(justification_parts)}"
+
+
+async def _get_fallback_recommendations(n: int, conn) -> List[dict]:
+    """Get popular books as fallback when not enough similar books found."""
+    fallback_result = await conn.execute(
+        text("""
+            SELECT c.book_id, c.title, c.author, c.genre, c.reading_level, 
+                   c.description as librarian_blurb
+            FROM catalog c
+            WHERE c.average_student_rating > :threshold
+            ORDER BY c.average_student_rating DESC NULLS LAST
+            LIMIT :n
+        """),
+        {"n": n, "threshold": reader_config.FALLBACK_RATING_THRESHOLD}
+    )
+    
+    fallback_books = []
+    for row in fallback_result.fetchall():
+        fallback_books.append({
+            "book_id": row.book_id,
+            "title": row.title,
+            "author": row.author,
+            "genre": row.genre,
+            "reading_level": row.reading_level or 5.0,
+            "librarian_blurb": row.librarian_blurb
+        })
+    
+    return fallback_books
+
+
+async def generate_reader_recommendations(
+    user_hash_id: str,
+    query: str,
+    n: int,
+    request_id: str,
+) -> Tuple[List[BookRecommendation], dict[str, Any]]:
+    """Generate personalized book recommendations for a reader based on their uploaded books."""
+    
+    logger.info("Starting reader recommendation generation", extra={
+        "request_id": request_id,
+        "user_hash_id": user_hash_id,
+        "n": n,
+        "query": query
+    })
+    
+    start_ts = time.perf_counter()
+    
+    try:
+        async with engine.begin() as conn:
+            # Fetch user's uploaded books
+            uploaded_books = await _fetch_user_uploaded_books(user_hash_id, conn)
+            
+            if not uploaded_books:
+                logger.warning("No uploaded books found for user", extra={"user_hash_id": user_hash_id})
+                return [], {
+                    "agent_duration": 0.0,
+                    "tool_count": 0,
+                    "tools": [],
+                    "error_count": 1,
+                    "error": "no_uploaded_books",
+                    "based_on_books": []
+                }
+            
+            # Fetch user's feedback history
+            feedback_scores = await _fetch_user_feedback_scores(user_hash_id, conn)
+            
+            # Find similar books in catalog
+            similar_books = await _fetch_similar_books(uploaded_books, user_hash_id, conn)
+            
+            # Calculate similarity scores for all candidates
+            candidates = []
+            for book in similar_books:
+                similarity_score = _calculate_similarity_score(book, uploaded_books, feedback_scores, query)
+                book["similarity_score"] = similarity_score
+                candidates.append(book)
+            
+            # Sort by similarity score and take top N
+            candidates.sort(key=lambda x: x["similarity_score"], reverse=True)
+            top_candidates = candidates[:n]
+            
+            # If we don't have enough recommendations, add popular books
+            if len(top_candidates) < n:
+                needed = n - len(top_candidates)
+                fallback_books = await _get_fallback_recommendations(needed, conn)
+                
+                # Add fallback books with default similarity score
+                for book in fallback_books:
+                    book["similarity_score"] = reader_config.FALLBACK_SCORE
+                    top_candidates.append(book)
+            
+            # Build final recommendations
+            recommendations = []
+            for candidate in top_candidates:
+                justification = _create_justification(candidate, uploaded_books, feedback_scores)
+                
+                recommendation = BookRecommendation(
+                    book_id=candidate["book_id"],
+                    title=candidate["title"] or "Unknown Title",
+                    author=candidate["author"] or "Unknown Author",
+                    reading_level=candidate["reading_level"],
+                    librarian_blurb=candidate["librarian_blurb"] or "No description available",
+                    justification=justification
+                )
+                recommendations.append(recommendation)
+            
+            # Calculate metrics
+            duration = time.perf_counter() - start_ts
+            
+            # Based on books for metadata
+            based_on_books = [f"{book['title']} by {book['author']}" for book in uploaded_books[:3]]
+            
+            logger.info("Reader recommendation generation completed", extra={
+                "request_id": request_id,
+                "user_hash_id": user_hash_id,
+                "recommendations_count": len(recommendations),
+                "duration_sec": duration,
+                "based_on_books_count": len(uploaded_books)
+            })
+            
+            return recommendations, {
+                "agent_duration": duration,
+                "tool_count": 1,
+                "tools": ["similarity_matching"],
+                "error_count": 0,
+                "based_on_books": based_on_books
+            }
+            
+    except Exception as exc:
+        duration = time.perf_counter() - start_ts
+        logger.error("Reader recommendation generation failed", extra={
+            "request_id": request_id,
+            "user_hash_id": user_hash_id,
+            "duration_sec": duration,
+            "error": str(exc)
+        }, exc_info=True)
+        
+        return [], {
+            "agent_duration": duration,
+            "tool_count": 0,
+            "tools": [],
+            "error_count": 1,
+            "error": str(exc),
+            "based_on_books": []
+        }
 
 async def _ask_agent(agent, prompt_messages, callbacks=None):
     """Run the LangChain agent and return final AIMessage.

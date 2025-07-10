@@ -4,6 +4,7 @@ from starlette.responses import JSONResponse
 from mcp import StdioServerParameters, stdio_client, ClientSession
 from common import SettingsInstance as S
 from common.structured_logging import get_logger, SERVICE_NAME
+from common.settings import settings
 from langchain.prompts import ChatPromptTemplate
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy import text
@@ -13,7 +14,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 from common.kafka_utils import publish_event
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import timedelta, datetime
 from langchain_core.messages import AIMessage
 from langchain.callbacks.base import AsyncCallbackHandler
 import inspect  # for token usage
@@ -23,10 +24,12 @@ from .service import (
     BookRecommendation,
     RecommendResponse,
     generate_recommendations,
+    generate_reader_recommendations,
 )
 from common.metrics import REQUEST_COUNTER, REQUEST_LATENCY
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+from common.events import FeedbackEvent, FEEDBACK_EVENTS_TOPIC
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -191,14 +194,41 @@ async def metrics():
 # --- Pydantic models for Swagger --------------------------------------------
 class BookRow(BaseModel, extra="allow"):
     """Flexible model that accepts any catalog columns."""
-    book_id: str = Field(..., example="B001")
+    book_id: str = Field(..., examples=["B001"])
 
 class BooksResponse(BaseModel):
     rows: List[BookRow]
 
 class MetricItem(BaseModel):
-    label: str = Field(..., example="recommendation_served")
-    value: int = Field(..., example=42)
+    label: str = Field(..., examples=["recommendation_served"])
+    value: int = Field(..., examples=[42])
+
+# --- Reader Mode Models ---
+class FeedbackRequest(BaseModel):
+    """Request model for reader feedback submission."""
+    user_hash_id: str = Field(..., description="Hashed user identifier")
+    book_id: str = Field(..., description="Book ID that received feedback")
+    score: int = Field(..., description="Feedback score: 1 for thumbs up, -1 for thumbs down")
+    feedback_text: Optional[str] = Field(None, description="Optional feedback text")
+
+class FeedbackResponse(BaseModel):
+    """Response model for feedback submission."""
+    message: str
+    request_id: str
+
+class ReaderRecommendResponse(BaseModel):
+    """Response model for reader recommendations."""
+    request_id: str
+    user_hash_id: str
+    recommendations: List[BookRecommendation]
+    duration_sec: float
+    based_on_books: List[str]  # Titles of books used for similarity
+
+class UserBooksResponse(BaseModel):
+    """Response model for user's uploaded books."""
+    user_hash_id: str
+    books: List[Dict[str, Any]]
+    total_count: int
 
 # ---------------------------------------------------------------------------
 # New endpoints for React UI -------------------------------------------------
@@ -336,9 +366,9 @@ async def metrics_summary():
     tags=["recommendations"]
 )
 async def recommend(
-    student_id: str = Query(..., description="Student identifier (e.g., 'S001')", example="S001"),
-    n: int = Query(3, ge=1, le=10, description="Number of recommendations to return", example=3),
-    query: str = Query("", description="Optional search query to filter recommendations", example="space adventure")
+    student_id: str = Query(..., description="Student identifier (e.g., 'S001')", examples=["S001"]),
+    n: int = Query(3, ge=1, le=10, description="Number of recommendations to return", examples=[3]),
+    query: str = Query("", description="Optional search query to filter recommendations", examples=["space adventure"])
 ):
     request_id = uuid.uuid4().hex
 
@@ -380,6 +410,249 @@ async def recommend(
     except Exception as exc:
         logger.error("Recommendation request failed", exc_info=True, extra={"request_id": request_id})
         raise HTTPException(500, "Failed to generate recommendation") from exc
+
+# ---------------------------------------------------------------------------
+# Reader Mode Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/feedback",
+    response_model=FeedbackResponse,
+    summary="Submit reader feedback on book recommendations",
+    description="""
+    Submit thumbs up/down feedback on book recommendations in Reader Mode.
+    Feedback is processed asynchronously and used to improve future recommendations.
+    """,
+    responses={
+        200: {"description": "Feedback submitted successfully"},
+        422: {"description": "Invalid feedback data"},
+        500: {"description": "Failed to process feedback"}
+    },
+    tags=["reader-mode"]
+)
+async def submit_feedback(feedback: FeedbackRequest):
+    # Check if Reader Mode is enabled
+    if not settings.enable_reader_mode:
+        logger.warning("Reader Mode feedback endpoint called but feature is disabled")
+        raise HTTPException(
+            status_code=404,
+            detail="Reader Mode is currently disabled. Set ENABLE_READER_MODE=true to enable this feature."
+        )
+    """Submit feedback for a book recommendation."""
+    request_id = uuid.uuid4().hex
+    
+    logger.info("Feedback submission received", extra={
+        "request_id": request_id,
+        "user_hash_id": feedback.user_hash_id,
+        "book_id": feedback.book_id,
+        "score": feedback.score
+    })
+    
+    try:
+        # Create feedback event
+        event = FeedbackEvent(
+            user_hash_id=feedback.user_hash_id,
+            book_id=feedback.book_id,
+            score=feedback.score
+        )
+        
+        # Publish to Kafka for async processing
+        await publish_event(FEEDBACK_EVENTS_TOPIC, event.model_dump())
+        
+        logger.info("Feedback event published", extra={
+            "request_id": request_id,
+            "user_hash_id": feedback.user_hash_id,
+            "book_id": feedback.book_id
+        })
+        
+        return FeedbackResponse(
+            message="Feedback submitted successfully",
+            request_id=request_id
+        )
+        
+    except Exception as exc:
+        logger.error("Failed to submit feedback", exc_info=True, extra={"request_id": request_id})
+        raise HTTPException(500, "Failed to process feedback") from exc
+
+@app.get(
+    "/recommendations/{user_hash_id}",
+    response_model=ReaderRecommendResponse,
+    summary="Get personalized recommendations for a reader",
+    description="""
+    Generate personalized book recommendations for a Reader Mode user based on their
+    uploaded book list and feedback history. Uses book similarity and collaborative
+    filtering to suggest relevant books.
+    """,
+    responses={
+        200: {"description": "Recommendations generated successfully"},
+        404: {"description": "User not found"},
+        500: {"description": "Failed to generate recommendations"}
+    },
+    tags=["reader-mode"]
+)
+async def get_reader_recommendations(
+    user_hash_id: str,
+    n: int = Query(5, ge=1, le=20, description="Number of recommendations to return"),
+    query: str = Query("", description="Optional search query to filter recommendations")
+):
+    # Check if Reader Mode is enabled
+    if not settings.enable_reader_mode:
+        logger.warning("Reader Mode recommendations endpoint called but feature is disabled")
+        raise HTTPException(
+            status_code=404,
+            detail="Reader Mode is currently disabled. Set ENABLE_READER_MODE=true to enable this feature."
+        )
+    """Get personalized recommendations for a reader."""
+    request_id = uuid.uuid4().hex
+    
+    logger.info("Reader recommendation request received", extra={
+        "request_id": request_id,
+        "user_hash_id": user_hash_id,
+        "n": n,
+        "query": query
+    })
+    
+    started = time.perf_counter()
+    
+    try:
+        # Check if user exists
+        async with engine.begin() as conn:
+            user_exists = await conn.execute(
+                text("SELECT 1 FROM public_users WHERE hash_id = :user_hash_id LIMIT 1"),
+                {"user_hash_id": user_hash_id}
+            )
+            if not user_exists.fetchone():
+                raise HTTPException(404, f"User {user_hash_id} not found")
+        
+        # Generate recommendations using reader-specific logic
+        recs, meta = await generate_reader_recommendations(user_hash_id, query, n, request_id)
+        
+        total_duration = time.perf_counter() - started
+        
+        # Log metrics
+        asyncio.create_task(
+            push_metric(
+                "reader_recommendation_served",
+                {
+                    "request_id": request_id,
+                    "user_hash_id": user_hash_id,
+                    "n": n,
+                    "duration_sec": total_duration,
+                    **meta,
+                },
+            )
+        )
+        
+        return ReaderRecommendResponse(
+            request_id=request_id,
+            user_hash_id=user_hash_id,
+            recommendations=recs,
+            duration_sec=round(total_duration, 3),
+            based_on_books=meta.get('based_on_books', [])
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Reader recommendation request failed", exc_info=True, extra={"request_id": request_id})
+        raise HTTPException(500, "Failed to generate recommendations") from exc
+
+@app.get(
+    "/user/{user_hash_id}/books",
+    response_model=UserBooksResponse,
+    summary="Get user's uploaded books",
+    description="""
+    Retrieve the list of books uploaded by a specific Reader Mode user.
+    Includes book metadata and upload timestamps.
+    """,
+    responses={
+        200: {"description": "User books retrieved successfully"},
+        404: {"description": "User not found"},
+        500: {"description": "Failed to retrieve user books"}
+    },
+    tags=["reader-mode"]
+)
+async def get_user_books(
+    user_hash_id: str,
+    limit: int = Query(100, ge=1, le=500, description="Maximum number of books to return"),
+    offset: int = Query(0, ge=0, description="Number of books to skip")
+):
+    # Check if Reader Mode is enabled
+    if not settings.enable_reader_mode:
+        logger.warning("Reader Mode user books endpoint called but feature is disabled")
+        raise HTTPException(
+            status_code=404,
+            detail="Reader Mode is currently disabled. Set ENABLE_READER_MODE=true to enable this feature."
+        )
+    
+    """Get user's uploaded books."""
+    logger.info("User books request received", extra={
+        "user_hash_id": user_hash_id,
+        "limit": limit,
+        "offset": offset
+    })
+    
+    try:
+        async with engine.begin() as conn:
+            # Check if user exists
+            user_exists = await conn.execute(
+                text("SELECT 1 FROM public_users WHERE hash_id = :user_hash_id LIMIT 1"),
+                {"user_hash_id": user_hash_id}
+            )
+            if not user_exists.fetchone():
+                raise HTTPException(404, f"User {user_hash_id} not found")
+            
+            # Get user's books
+            books_result = await conn.execute(
+                text("""
+                    SELECT ub.id, ub.title, ub.author, ub.rating, ub.notes, ub.raw_payload, ub.created_at
+                    FROM uploaded_books ub
+                    JOIN public_users pu ON ub.user_id = pu.id
+                    WHERE pu.hash_id = :user_hash_id 
+                    ORDER BY ub.created_at DESC 
+                    LIMIT :limit OFFSET :offset
+                """),
+                {"user_hash_id": user_hash_id, "limit": limit, "offset": offset}
+            )
+            
+            books = []
+            for row in books_result.fetchall():
+                raw_payload = row.raw_payload or {}
+                books.append({
+                    "id": str(row.id),
+                    "title": row.title,
+                    "author": row.author,
+                    "rating": row.rating,
+                    "notes": row.notes,
+                    "genre": raw_payload.get("genre"),
+                    "isbn": raw_payload.get("isbn"),
+                    "reading_level": raw_payload.get("reading_level"),
+                    "uploaded_at": row.created_at.isoformat() if row.created_at else None
+                })
+            
+            # Get total count
+            count_result = await conn.execute(
+                text("""
+                    SELECT COUNT(*) 
+                    FROM uploaded_books ub
+                    JOIN public_users pu ON ub.user_id = pu.id
+                    WHERE pu.hash_id = :user_hash_id
+                """),
+                {"user_hash_id": user_hash_id}
+            )
+            total_count = count_result.fetchone()[0]
+            
+            return UserBooksResponse(
+                user_hash_id=user_hash_id,
+                books=books,
+                total_count=total_count
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Failed to retrieve user books", exc_info=True, extra={"user_hash_id": user_hash_id})
+        raise HTTPException(500, "Failed to retrieve user books") from exc
 
 class MetricCallbackHandler(AsyncCallbackHandler):
     """Collect per-run observability data."""
@@ -435,6 +708,6 @@ if __name__ == "__main__":  # pragma: no cover
     uvicorn.run(
         "src.recommendation_api.main:app",
         host="127.0.0.1",
-        port=S.api_port,
+        port=S.recommendation_api_port,
         reload=False,
     ) 
