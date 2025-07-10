@@ -139,6 +139,84 @@ services:
       - "8501:8501"
     depends_on: [recommendation_api]
     
+  # React + Vite single-page application served via Nginx
+  frontend:
+    build:
+      context: ./src/react_ui
+    platform: linux/amd64
+    container_name: frontend
+    depends_on:
+      - recommendation_api
+    ports:
+      - "8080:80"
+    # No env vars needed; Nginx proxies /api/* to recommendation_api
+    # If you ever rename the backend service, update nginx.conf accordingly.
+    
+
+  # ---- READER MODE SERVICES ----
+  # Handles user book uploads (JSON/CSV), validates data, enriches metadata, and publishes events
+  user_ingest_service:
+    build:
+      context: .
+      dockerfile: src/user_ingest_service/Dockerfile
+    platform: linux/amd64
+    container_name: user_ingest_service
+    env_file:
+      - .env
+    ports:
+      - "8004:8004"
+    environment:
+      - OPENAI_API_KEY
+      - OPENAI_MODEL=${OPENAI_MODEL}
+      - DB_URL=${DB_URL}
+      - KAFKA_BROKERS=${KAFKA_BROKERS}
+      - REDIS_URL=${REDIS_URL}
+      - ENABLE_READER_MODE=${ENABLE_READER_MODE}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: ${ENABLE_READER_MODE:-1}
+
+  # Processes user feedback events, updates database, and maintains recommendation scoring
+  feedback_worker:
+    build:
+      context: .
+      dockerfile: src/feedback_worker/Dockerfile
+    platform: linux/amd64
+    container_name: feedback_worker
+    env_file:
+      - .env
+    environment:
+      - DB_URL=${DB_URL}
+      - KAFKA_BROKERS=${KAFKA_BROKERS}
+      - REDIS_URL=${REDIS_URL}
+      - ENABLE_READER_MODE=${ENABLE_READER_MODE}
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "python"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: ${ENABLE_READER_MODE:-1}
 
   
   # Kafka consumer that aggregates metrics events for monitoring and performance dashboards.

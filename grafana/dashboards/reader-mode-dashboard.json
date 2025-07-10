@@ -1,0 +1,131 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "Reader Mode - Production Monitoring",
+    "tags": ["reader-mode", "production", "monitoring"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "System Overview",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "up{job=\"reader_mode_services\"}",
+            "legendFormat": "Services Up"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Request Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(http_requests_total{job=\"reader_mode_services\"}[5m])",
+            "legendFormat": "{{service}} - {{method}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Response Time",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job=\"reader_mode_services\"}[5m]))",
+            "legendFormat": "95th percentile"
+          },
+          {
+            "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket{job=\"reader_mode_services\"}[5m]))",
+            "legendFormat": "50th percentile"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "id": 4,
+        "title": "Error Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(http_requests_total{job=\"reader_mode_services\",status=~\"5..\"}[5m])",
+            "legendFormat": "5xx Errors"
+          },
+          {
+            "expr": "rate(http_requests_total{job=\"reader_mode_services\",status=~\"4..\"}[5m])",
+            "legendFormat": "4xx Errors"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      },
+      {
+        "id": 5,
+        "title": "Memory Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "container_memory_usage_bytes{name=~\"user_ingest_service|feedback_worker\"} / 1024 / 1024",
+            "legendFormat": "{{name}} Memory (MB)"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+      },
+      {
+        "id": 6,
+        "title": "CPU Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(container_cpu_usage_seconds_total{name=~\"user_ingest_service|feedback_worker\"}[5m]) * 100",
+            "legendFormat": "{{name}} CPU %"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}
+      },
+      {
+        "id": 7,
+        "title": "Book Uploads (Business Metric)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "increase(book_uploads_total[1h])",
+            "legendFormat": "Books Uploaded (Last Hour)"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 8, "x": 0, "y": 24}
+      },
+      {
+        "id": 8,
+        "title": "Feedback Events (Business Metric)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "increase(feedback_events_total[1h])",
+            "legendFormat": "Feedback Events (Last Hour)"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 8, "x": 8, "y": 24}
+      },
+      {
+        "id": 9,
+        "title": "Recommendations Generated (Business Metric)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "increase(recommendations_generated_total[1h])",
+            "legendFormat": "Recommendations (Last Hour)"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 8, "x": 16, "y": 24}
+      }
+    ],
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "refresh": "5s"
+  }
+} 

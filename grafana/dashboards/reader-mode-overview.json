@@ -1,0 +1,262 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "📚 Reader Mode - Production Monitoring",
+    "description": "Comprehensive monitoring dashboard for Reader Mode services including system metrics, application performance, and business KPIs",
+    "tags": ["reader-mode", "production", "monitoring", "business-metrics"],
+    "timezone": "browser",
+    "editable": true,
+    "graphTooltip": 0,
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "refresh": "5s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "🟢 Reader Mode Services Status",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "up{job=\"reader_mode_services\"}",
+            "legendFormat": "{{instance}} - {{job}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "green", "value": 1}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "📈 Request Rate (req/sec)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(http_requests_total{job=\"reader_mode_services\"}[5m])",
+            "legendFormat": "{{service}} - {{method}}"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Requests/sec",
+            "min": 0
+          }
+        ],
+        "gridPos": {"h": 8, "w": 9, "x": 6, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "⏱️ Response Time Distribution",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job=\"reader_mode_services\"}[5m]))",
+            "legendFormat": "95th percentile"
+          },
+          {
+            "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket{job=\"reader_mode_services\"}[5m]))",
+            "legendFormat": "50th percentile"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Seconds",
+            "min": 0
+          }
+        ],
+        "gridPos": {"h": 8, "w": 9, "x": 15, "y": 0}
+      },
+      {
+        "id": 4,
+        "title": "🚨 Error Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(http_requests_total{job=\"reader_mode_services\",status=~\"5..\"}[5m])",
+            "legendFormat": "5xx Server Errors"
+          },
+          {
+            "expr": "rate(http_requests_total{job=\"reader_mode_services\",status=~\"4..\"}[5m])",
+            "legendFormat": "4xx Client Errors"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Errors/sec",
+            "min": 0
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "id": 5,
+        "title": "💾 Memory Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "container_memory_usage_bytes{name=~\"user_ingest_service|feedback_worker\"} / 1024 / 1024",
+            "legendFormat": "{{name}} Memory (MB)"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "MB",
+            "min": 0
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      },
+      {
+        "id": 6,
+        "title": "🔥 CPU Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(container_cpu_usage_seconds_total{name=~\"user_ingest_service|feedback_worker\"}[5m]) * 100",
+            "legendFormat": "{{name}} CPU %"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "CPU %",
+            "min": 0,
+            "max": 100
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+      },
+      {
+        "id": 7,
+        "title": "📚 Book Uploads (Business KPI)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "increase(book_uploads_total[1h])",
+            "legendFormat": "Books Uploaded"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "unit": "short"
+          }
+        },
+        "gridPos": {"h": 8, "w": 4, "x": 12, "y": 16}
+      },
+      {
+        "id": 8,
+        "title": "👍 Feedback Events (Business KPI)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "increase(feedback_events_total[1h])",
+            "legendFormat": "Feedback Events"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "unit": "short"
+          }
+        },
+        "gridPos": {"h": 8, "w": 4, "x": 16, "y": 16}
+      },
+      {
+        "id": 9,
+        "title": "🎯 Recommendations Generated (Business KPI)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "increase(recommendations_generated_total[1h])",
+            "legendFormat": "Recommendations"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "unit": "short"
+          }
+        },
+        "gridPos": {"h": 8, "w": 4, "x": 20, "y": 16}
+      },
+      {
+        "id": 10,
+        "title": "🔍 Book Enrichment Success Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(book_enrichment_success_total[5m]) / rate(book_enrichment_attempts_total[5m]) * 100",
+            "legendFormat": "Success Rate %"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Success %",
+            "min": 0,
+            "max": 100
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24}
+      },
+      {
+        "id": 11,
+        "title": "⚡ Kafka Message Processing",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(kafka_messages_consumed_total{topic=~\"user_uploads|feedback_events\"}[5m])",
+            "legendFormat": "{{topic}} - Messages/sec"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Messages/sec",
+            "min": 0
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24}
+      }
+    ],
+    "templating": {
+      "list": [
+        {
+          "name": "service",
+          "type": "query",
+          "query": "label_values(up{job=\"reader_mode_services\"}, instance)",
+          "refresh": 1,
+          "multi": true,
+          "includeAll": true
+        }
+      ]
+    },
+    "annotations": {
+      "list": [
+        {
+          "name": "Deployments",
+          "datasource": "Prometheus",
+          "expr": "changes(up{job=\"reader_mode_services\"}[5m]) > 0",
+          "titleFormat": "Service Restart",
+          "textFormat": "{{instance}} restarted"
+        }
+      ]
+    }
+  }
+} 
