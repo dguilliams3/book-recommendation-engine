@@ -1,4 +1,4 @@
-import asyncio, json, os, uuid
+import asyncio, json, os, uuid, shutil
 from pathlib import Path
 from filelock import FileLock
 from langchain_openai import OpenAIEmbeddings
@@ -22,6 +22,67 @@ async def ensure_store():
     if (VECTOR_DIR / "index.faiss").exists():
         return FAISS.load_local(VECTOR_DIR, embeddings, allow_dangerous_deserialization=True)
     return FAISS.from_texts(["dummy"], embeddings, metadatas=[{"book_id": "dummy"}])
+
+async def update_faiss_index_atomic(texts: list[str], metadatas: list[dict], event_id: str):
+    """Atomically update FAISS index with backup/restore mechanism."""
+    backup_path = VECTOR_DIR.parent / f"{VECTOR_DIR.name}.backup"
+    temp_path = VECTOR_DIR.parent / f"{VECTOR_DIR.name}.temp"
+    
+    # Clean up any existing temp/backup directories
+    if backup_path.exists():
+        shutil.rmtree(backup_path)
+    if temp_path.exists():
+        shutil.rmtree(temp_path)
+    
+    try:
+        with FileLock(str(LOCK_FILE)):
+            # Create backup of current index
+            if VECTOR_DIR.exists():
+                shutil.copytree(VECTOR_DIR, backup_path)
+                logger.debug("FAISS index backup created", extra={"event_id": event_id})
+            
+            # Load current store
+            store = await ensure_store()
+            
+            # Add new texts
+            store.add_texts(texts, metadatas=metadatas)
+            
+            # Save to temporary location first
+            store.save_local(temp_path)
+            
+            # Atomic move: replace current index with updated one
+            if VECTOR_DIR.exists():
+                shutil.rmtree(VECTOR_DIR)
+            shutil.move(temp_path, VECTOR_DIR)
+            
+            # Remove backup on success
+            if backup_path.exists():
+                shutil.rmtree(backup_path)
+                
+            logger.info("FAISS index updated atomically", extra={
+                "event_id": event_id,
+                "texts_added": len(texts),
+                "index_size": store.index.ntotal
+            })
+            
+    except Exception as e:
+        logger.error("FAISS index update failed", exc_info=True, extra={"event_id": event_id})
+        
+        # Restore from backup if it exists
+        if backup_path.exists():
+            try:
+                if VECTOR_DIR.exists():
+                    shutil.rmtree(VECTOR_DIR)
+                shutil.move(backup_path, VECTOR_DIR)
+                logger.info("FAISS index restored from backup", extra={"event_id": event_id})
+            except Exception as restore_error:
+                logger.error("Failed to restore FAISS index from backup", exc_info=True, extra={"event_id": event_id})
+        
+        # Clean up temp directory
+        if temp_path.exists():
+            shutil.rmtree(temp_path)
+            
+        raise  # Re-raise original exception
 
 async def update_book_embeddings_table(book_ids: list[str], event_id: str = None):
     """Update the book_embeddings table with audit trail."""
@@ -102,11 +163,8 @@ async def handle_book_event(evt: dict):
             }
         )
     
-    # Embed and add to FAISS with lock
-    with FileLock(str(LOCK_FILE)):
-        store = await ensure_store()
-        store.add_texts(texts, metadatas=metadatas)
-        store.save_local(VECTOR_DIR)
+    # Embed and add to FAISS with atomic operations
+    await update_faiss_index_atomic(texts, metadatas, event_id)
         
     # Update audit trail in database
     processed_ids = [r["book_id"] for r in rows]
