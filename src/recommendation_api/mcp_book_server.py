@@ -391,7 +391,7 @@ async def get_book_recommendations_for_group(student_ids: List[str], n: int = 3)
         
     Returns:
         List[dict]: Book recommendations with format:
-            [{"book_id": "B001", "title": "Book Title", "average_student_rating": 4.5}]
+            [{"book_id": "B001", "title": "Book Title", "average_rating": 4.5}]
             Ordered by average rating descending
             
     Usage:
@@ -426,10 +426,10 @@ async def get_book_recommendations_for_group(student_ids: List[str], n: int = 3)
 
             # candidate pool: highest rated books
             rows = await con.fetch(
-                """SELECT book_id, title, average_student_rating
+                """SELECT book_id, title, average_rating
                      FROM catalog
-                    WHERE average_student_rating IS NOT NULL
-                 ORDER BY average_student_rating DESC LIMIT 50"""
+                    WHERE average_rating IS NOT NULL
+                 ORDER BY average_rating DESC LIMIT 50"""
             )
             
             recs = [
@@ -561,7 +561,7 @@ async def query_catalog(book_id: str = None, genre: str = None, difficulty_band:
         - publication_year (INT): Year published
         - difficulty_band (TEXT): Reading difficulty: "beginner", "early_elementary", etc.
         - reading_level (REAL): Numeric reading level (e.g., 4.2)
-        - average_student_rating (REAL): Average rating 1.0-5.0
+        - average_rating (REAL): Average rating 1.0-5.0
         
     Args:
         book_id (str, optional): Specific book to look up
@@ -611,7 +611,7 @@ async def query_catalog(book_id: str = None, genre: str = None, difficulty_band:
                 param_idx += 1
                 
             if min_rating is not None:
-                where_clauses.append(f"average_student_rating >= ${param_idx}")
+                where_clauses.append(f"average_rating >= ${param_idx}")
                 params.append(min_rating)
                 param_idx += 1
             

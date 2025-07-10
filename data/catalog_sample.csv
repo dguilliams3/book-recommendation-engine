@@ -1,4 +1,4 @@
-book_id,title,author,isbn,genre,difficulty_band,reading_level,publication_year,page_count,average_student_rating
+book_id,title,author,isbn,genre,difficulty_band,reading_level,publication_year,page_count,average_rating
 B001,Charlotte's Web,E.B. White,9780064400558,"[""fiction"", ""classic""]",early_elementary,4.4,1952,184,5.0
 B002,Diary of a Wimpy Kid,Jeff Kinney,9780810993136,"[""fiction"", ""humor""]",early_elementary,3.2,2007,217,4.5
 B003,Magic Tree House #1: Dinosaurs Before Dark,Mary Pope Osborne,9780679824114,"[""fiction"", ""adventure""]",early_elementary,2.8,1992,68,4.1
