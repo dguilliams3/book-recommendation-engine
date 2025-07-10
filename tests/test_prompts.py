@@ -20,7 +20,10 @@ def test_parser_happy_path():
                 {
                     "book_id": "42",
                     "title": "Hitchhiker's Guide",
-                    "librarian_blurb": "A whimsical journey across the galaxy."
+                    "author": "Douglas Adams",
+                    "reading_level": 8.5,
+                    "librarian_blurb": "A whimsical journey across the galaxy.",
+                    "justification": "Matches user's interest in science fiction and humor."
                 }
             ]
         }

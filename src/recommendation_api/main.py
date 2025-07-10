@@ -1,6 +1,9 @@
 import asyncio, json, os, uuid, time, sys
 from fastapi import FastAPI, HTTPException, Request, Query
 from starlette.responses import JSONResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from mcp import StdioServerParameters, stdio_client, ClientSession
 from common.settings import settings as S
 from common.structured_logging import get_logger, SERVICE_NAME
@@ -25,6 +28,7 @@ from .service import (
     RecommendResponse,
     generate_recommendations,
     generate_reader_recommendations,
+    generate_agent_recommendations,
 )
 from common.metrics import REQUEST_COUNTER, REQUEST_LATENCY
 from pydantic import BaseModel, Field
@@ -62,6 +66,12 @@ app = FastAPI(
     },
     lifespan=lifespan
 )
+
+# Rate limiting configuration
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 logger = get_logger(__name__)
 
 # --- auto-DDL setup ----------------------------------------------------
@@ -365,7 +375,9 @@ async def metrics_summary():
     },
     tags=["recommendations"]
 )
+@limiter.limit("10/minute")
 async def recommend(
+    request: Request,
     student_id: str = Query(..., description="Student identifier (e.g., 'S001')", examples=["S001"]),
     n: int = Query(3, ge=1, le=10, description="Number of recommendations to return", examples=[3]),
     query: str = Query("", description="Optional search query to filter recommendations", examples=["space adventure"])
@@ -382,7 +394,30 @@ async def recommend(
     started = time.perf_counter()
 
     try:
-        recs, meta = await generate_recommendations(student_id, query, n, request_id)
+        # Build student context for unified agent function
+        from .service import _get_student_context_cached
+        from .candidate_builder import build_candidates
+        from .scoring import score_candidates
+        
+        # Get student context
+        avg_level, recent_titles, top_genres, band_hist = await _get_student_context_cached(student_id)
+        
+        # Build and score candidates
+        candidates = await build_candidates(student_id, n)
+        scored_candidates = await score_candidates(candidates, student_id, query)
+        
+        # Build context for unified agent
+        context = {
+            "student_id": student_id,
+            "candidates": scored_candidates,
+            "avg_level": avg_level,
+            "recent_titles": recent_titles,
+            "top_genres": top_genres,
+            "band_hist": band_hist,
+        }
+        
+        # Use unified agent function
+        recs, meta = await generate_agent_recommendations("student", context, query, n, request_id)
 
         total_duration = time.perf_counter() - started
 
@@ -430,7 +465,8 @@ async def recommend(
     },
     tags=["reader-mode"]
 )
-async def submit_feedback(feedback: FeedbackRequest):
+@limiter.limit("30/minute")
+async def submit_feedback(request: Request, feedback: FeedbackRequest):
     # Check if Reader Mode is enabled
     if not settings.enable_reader_mode:
         logger.warning("Reader Mode feedback endpoint called but feature is disabled")
@@ -490,7 +526,9 @@ async def submit_feedback(feedback: FeedbackRequest):
     },
     tags=["reader-mode"]
 )
+@limiter.limit("20/minute")
 async def get_reader_recommendations(
+    request: Request,
     user_hash_id: str,
     n: int = Query(5, ge=1, le=20, description="Number of recommendations to return"),
     query: str = Query("", description="Optional search query to filter recommendations")
@@ -524,8 +562,32 @@ async def get_reader_recommendations(
             if not user_exists.fetchone():
                 raise HTTPException(404, f"User {user_hash_id} not found")
         
-        # Generate recommendations using reader-specific logic
-        recs, meta = await generate_reader_recommendations(user_hash_id, query, n, request_id)
+        # Build reader context for unified agent function
+        from .service import _fetch_user_uploaded_books_cached, _fetch_user_feedback_scores_cached
+        
+        # Get user's uploaded books and feedback
+        uploaded_books = await _fetch_user_uploaded_books_cached(user_hash_id)
+        feedback_scores = await _fetch_user_feedback_scores_cached(user_hash_id)
+        
+        if not uploaded_books:
+            # Fall back to rule-based recommendations if no uploaded books
+            recs, meta = await generate_reader_recommendations(user_hash_id, query, n, request_id)
+        else:
+            # Build candidates for agent-based recommendations
+            from .service import _fetch_similar_books
+            async with engine.begin() as conn:
+                candidates = await _fetch_similar_books(uploaded_books, user_hash_id, conn)
+            
+            # Build context for unified agent
+            context = {
+                "user_hash_id": user_hash_id,
+                "uploaded_books": uploaded_books,
+                "feedback_scores": feedback_scores,
+                "candidates": candidates,
+            }
+            
+            # Use unified agent function
+            recs, meta = await generate_agent_recommendations("reader", context, query, n, request_id)
         
         total_duration = time.perf_counter() - started
         

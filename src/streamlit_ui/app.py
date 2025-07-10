@@ -647,54 +647,50 @@ def main():
                             help="Add keywords to get more targeted recommendations"
                         )
                         num_recs = st.slider("Number of recommendations", 1, 5, 3)
-                        
                         get_recs = st.form_submit_button("🎯 Get My Recommendations", type="primary")
-                        
                         if get_recs:
                             with st.spinner("Finding your perfect next reads..."):
                                 result = get_reader_recommendations(user_hash_id, interests, num_recs)
-                                
                                 if "error" in result:
                                     st.error(result["error"])
                                     if "not found" in result["error"].lower():
                                         st.info("💡 **Tip:** Upload some books first in the 'Upload Books' tab to get personalized recommendations.")
                                 else:
                                     st.success("🎉 Here are your personalized recommendations!")
-                                    
-                                    recommendations = result.get("recommendations", [])
-                                    if recommendations:
-                                        for i, rec in enumerate(recommendations, 1):
-                                            with st.container():
-                                                st.write(f"**{i}. {rec.get('title', 'Unknown Title')}**")
-                                                if rec.get('author'):
-                                                    st.write(f"*by {rec['author']}*")
-                                                if rec.get('reading_level'):
-                                                    st.write(f"📊 Reading Level: {rec['reading_level']}")
-                                                if rec.get('librarian_blurb'):
-                                                    st.write(f"📝 {rec['librarian_blurb']}")
-                                                if rec.get('justification'):
-                                                    st.write(f"🎯 **Why this book:** {rec['justification']}")
-                                                
-                                                # Feedback buttons
-                                                col1, col2, col3 = st.columns([1, 1, 6])
-                                                with col1:
-                                                    if st.button("👍", key=f"thumbs_up_{rec.get('book_id', i)}"):
-                                                        feedback_result = submit_feedback(user_hash_id, rec.get('book_id', ''), 1)
-                                                        if "error" in feedback_result:
-                                                            st.error(f"Feedback error: {feedback_result['error']}")
-                                                        else:
-                                                            st.success("👍 Thanks for the feedback!")
-                                                with col2:
-                                                    if st.button("👎", key=f"thumbs_down_{rec.get('book_id', i)}"):
-                                                        feedback_result = submit_feedback(user_hash_id, rec.get('book_id', ''), -1)
-                                                        if "error" in feedback_result:
-                                                            st.error(f"Feedback error: {feedback_result['error']}")
-                                                        else:
-                                                            st.success("👎 Thanks for the feedback!")
-                                                
-                                                st.divider()
+                                    st.session_state["recommendations"] = result.get("recommendations", [])
+                
+                # After the form (outside the form context)
+                recommendations = st.session_state.get("recommendations", [])
+                if recommendations:
+                    for i, rec in enumerate(recommendations, 1):
+                        with st.container():
+                            st.write(f"**{i}. {rec.get('title', 'Unknown Title')}**")
+                            if rec.get('author'):
+                                st.write(f"*by {rec['author']}*")
+                            if rec.get('reading_level'):
+                                st.write(f"📊 Reading Level: {rec['reading_level']}")
+                            if rec.get('librarian_blurb'):
+                                st.write(f"📝 {rec['librarian_blurb']}")
+                            if rec.get('justification'):
+                                st.write(f"🎯 **Why this book:** {rec['justification']}")
+                            col1, col2, col3 = st.columns([1, 1, 6])
+                            with col1:
+                                if st.button("👍", key=f"thumbs_up_{rec.get('book_id', i)}"):
+                                    feedback_result = submit_feedback(user_hash_id, rec.get('book_id', ''), 1)
+                                    if "error" in feedback_result:
+                                        st.error(f"Feedback error: {feedback_result['error']}")
                                     else:
-                                        st.info("No recommendations available. Try uploading more books or adjusting your interests.")
+                                        st.success("👍 Thanks for the feedback!")
+                            with col2:
+                                if st.button("👎", key=f"thumbs_down_{rec.get('book_id', i)}"):
+                                    feedback_result = submit_feedback(user_hash_id, rec.get('book_id', ''), -1)
+                                    if "error" in feedback_result:
+                                        st.error(f"Feedback error: {feedback_result['error']}")
+                                    else:
+                                        st.success("👎 Thanks for the feedback!")
+                            st.divider()
+                else:
+                    st.info("No recommendations available. Try uploading more books or adjusting your interests.")
                 
                 with reader_tab3:
                     st.write("**Your uploaded reading history**")
