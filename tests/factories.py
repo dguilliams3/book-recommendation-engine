@@ -30,7 +30,7 @@ def make_book(**overrides: Any) -> models.BookCatalogItem:
         "publication_year": overrides.get("publication_year", 2020),
         "difficulty_band": overrides.get("difficulty_band", "late_elementary"),
         "reading_level": overrides.get("reading_level", 3.0),
-        "average_student_rating": overrides.get("average_student_rating", 3.5),
+        "average_rating": overrides.get("average_rating", 3.5),
     }
     defaults.update(overrides)
     return models.BookCatalogItem(**defaults)

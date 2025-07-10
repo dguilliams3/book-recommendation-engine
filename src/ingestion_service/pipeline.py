@@ -138,7 +138,7 @@ async def run_ingestion():
                         "publication_year": item.publication_year,
                         "difficulty_band": item.difficulty_band,
                         "reading_level": rl,
-                        "average_rating": item.average_student_rating,
+                        "average_rating": item.average_rating,
                     },
                 )
 
