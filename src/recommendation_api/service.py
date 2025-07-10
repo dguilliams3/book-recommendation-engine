@@ -127,6 +127,39 @@ async def get_db_connection():
         connection_pool = await get_connection_pool()
     return await connection_pool.get_db_pool(async_db_url)
 
+async def execute_with_deadlock_retry(conn, query, params=None, max_retries=3, base_delay=0.1):
+    """Execute a query with deadlock retry logic and exponential backoff."""
+    import asyncio
+    
+    for attempt in range(max_retries):
+        try:
+            if params:
+                result = await conn.execute(query, params)
+            else:
+                result = await conn.execute(query)
+            return result
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "deadlock" in error_msg or "lock timeout" in error_msg or "lock wait timeout" in error_msg:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)  # Exponential backoff
+                    logger.warning(f"Database deadlock detected, retrying in {delay}s", extra={
+                        "attempt": attempt + 1,
+                        "max_retries": max_retries,
+                        "error": str(e)
+                    })
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    logger.error("Max deadlock retries exceeded", extra={
+                        "max_retries": max_retries,
+                        "error": str(e)
+                    })
+                    raise
+            else:
+                # Not a deadlock, re-raise immediately
+                raise
+
 # ---------------------------------------------------------------------------
 # Cached helper functions
 # ---------------------------------------------------------------------------

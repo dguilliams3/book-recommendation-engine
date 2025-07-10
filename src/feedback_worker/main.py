@@ -6,6 +6,7 @@ Handles feedback scoring and recommendation adjustment.
 """
 
 import asyncio
+import signal
 import redis.asyncio as redis
 from typing import Dict, Any
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
@@ -118,8 +119,19 @@ async def get_book_feedback_score(book_id: str) -> float:
     return total_score / len(scores)
 
 async def main():
-    """Main worker loop"""
+    """Main worker loop with graceful shutdown handling"""
     logger.info("Starting Feedback Worker")
+    
+    # Create shutdown event for graceful termination
+    shutdown_event = asyncio.Event()
+    
+    def signal_handler(signum, frame):
+        logger.info("Received shutdown signal", extra={"signal": signum})
+        shutdown_event.set()
+    
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
     # Create Kafka consumer
     consumer = KafkaEventConsumer(
@@ -129,16 +141,43 @@ async def main():
     
     try:
         # Start consuming events
-        await consumer.start(process_feedback_event)
-    except KeyboardInterrupt:
-        logger.info("Received shutdown signal")
+        consumer_task = asyncio.create_task(consumer.start(process_feedback_event))
+        
+        # Wait for shutdown signal or consumer completion
+        await asyncio.gather(
+            consumer_task,
+            shutdown_event.wait(),
+            return_exceptions=True
+        )
+        
     except Exception as e:
         logger.error("Feedback worker error", exc_info=True)
     finally:
-        await consumer.stop()
+        logger.info("Initiating graceful shutdown")
+        
+        # Stop consumer gracefully
+        try:
+            await consumer.stop()
+            logger.info("Kafka consumer stopped")
+        except Exception as e:
+            logger.error("Error stopping consumer", exc_info=True)
+        
+        # Close Redis connection
         if redis_client:
-            await redis_client.close()
-        logger.info("Feedback Worker stopped")
+            try:
+                await redis_client.close()
+                logger.info("Redis connection closed")
+            except Exception as e:
+                logger.error("Error closing Redis connection", exc_info=True)
+        
+        # Close database connections
+        try:
+            await engine.dispose()
+            logger.info("Database connections closed")
+        except Exception as e:
+            logger.error("Error closing database connections", exc_info=True)
+        
+        logger.info("Feedback Worker stopped gracefully")
 
 if __name__ == "__main__":
     asyncio.run(main()) 
