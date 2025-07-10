@@ -1,0 +1,8 @@
+{"timestamp": "2025-06-27T05:51:00Z", "service": "recommendation_api", "level": "INFO", "event": "Service started successfully", "logger": "recommendation_api.main", "request_id": "startup-001"}
+{"timestamp": "2025-06-27T05:51:15Z", "service": "recommendation_api", "level": "INFO", "event": "Student recommendation request received", "logger": "recommendation_api.service", "request_id": "req-001", "student_id": "S001", "query": "adventure"}
+{"timestamp": "2025-06-27T05:51:16Z", "service": "recommendation_api", "level": "WARNING", "event": "Student not found in database", "logger": "recommendation_api.service", "request_id": "req-002", "student_id": "SS00007"}
+{"timestamp": "2025-06-27T05:51:30Z", "service": "streamlit_ui", "level": "INFO", "event": "User accessed Database Explorer tab", "logger": "streamlit_ui.app", "request_id": "ui-001"}
+{"timestamp": "2025-06-27T05:51:45Z", "service": "log_consumer", "level": "INFO", "event": "Log consumer processing message", "logger": "log_consumer.main", "request_id": "log-001"}
+{"timestamp": "2025-06-27T05:52:00Z", "service": "book_enrichment_worker", "level": "ERROR", "event": "Failed to fetch metadata from Google Books API", "logger": "book_enrichment_worker.main", "request_id": "enrich-001", "book_id": "B001", "error": "API timeout"}
+{"timestamp": "2025-06-27T05:52:15Z", "service": "recommendation_api", "level": "INFO", "event": "MCP session initialized successfully", "logger": "recommendation_api.service", "request_id": "req-003"}
+{"timestamp": "2025-06-27T05:52:30Z", "service": "graph_refresher", "level": "DEBUG", "event": "Computing student similarity matrix", "logger": "graph_refresher.main", "request_id": "graph-001", "student_count": 5} 

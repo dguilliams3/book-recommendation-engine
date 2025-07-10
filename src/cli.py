@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 
 import typer
+from common.settings import SettingsInstance as S
 
 # Import the async entry-points of the three worker jobs using relative imports
 from .ingestion_service.main import ingest as _ingest_job
@@ -15,9 +16,9 @@ app = typer.Typer(help="Book-Recommendation-Engine control-plane CLI")
 # ---------------------------------------------------------------------
 @app.command()
 def ingest(
-    catalog: Path = typer.Option(Path("data/catalog_sample.csv"), help="Catalog CSV file"),
-    students: Path = typer.Option(Path("data/students_sample.csv"), help="Students CSV file"),
-    checkouts: Path = typer.Option(Path("data/checkouts_sample.csv"), help="Checkouts CSV file"),
+    catalog: Path = typer.Option(S.catalog_csv_path, help="Catalog CSV file"),
+    students: Path = typer.Option(S.students_csv_path, help="Students CSV file"),
+    checkouts: Path = typer.Option(S.checkouts_csv_path, help="Checkouts CSV file"),
 ):
     """Run the full CSV → Postgres → FAISS ingestion pipeline."""
 
