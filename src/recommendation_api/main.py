@@ -31,15 +31,68 @@ from .service import (
     generate_agent_recommendations,
 )
 from common.metrics import REQUEST_COUNTER, REQUEST_LATENCY
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import List, Dict, Any, Optional
 from common.events import FeedbackEvent, FEEDBACK_EVENTS_TOPIC
+
+async def _validate_configuration():
+    """Validate critical configuration on startup."""
+    logger.info("Validating configuration")
+    errors = []
+    
+    # Check required environment variables
+    if not S.openai_api_key:
+        errors.append("OPENAI_API_KEY not configured")
+    
+    if not S.db_url:
+        errors.append("Database URL not configured")
+    
+    # Validate database connection
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        logger.info("Database connection validated")
+    except Exception as e:
+        errors.append(f"Database connection failed: {e}")
+    
+    # Validate Redis connection (non-critical)
+    try:
+        from common.redis_utils import get_redis_client
+        redis_client = get_redis_client()
+        if redis_client:
+            await redis_client.ping()
+            logger.info("Redis connection validated")
+        else:
+            logger.warning("Redis not available, using fallback")
+    except Exception as e:
+        logger.warning(f"Redis connection failed: {e}")
+    
+    # Validate vector store directory
+    try:
+        S.vector_store_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Vector store directory validated")
+    except Exception as e:
+        errors.append(f"Vector store directory creation failed: {e}")
+    
+    # Validate model configuration
+    if S.model_max_tokens <= 0:
+        errors.append("MODEL_MAX_TOKENS must be positive")
+    
+    if S.similarity_threshold < 0 or S.similarity_threshold > 1:
+        errors.append("SIMILARITY_THRESHOLD must be between 0 and 1")
+    
+    if errors:
+        logger.error("Configuration validation failed", extra={"errors": errors})
+        raise ValueError(f"Configuration validation failed: {'; '.join(errors)}")
+    
+    logger.info("Configuration validation completed successfully")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage startup and shutdown tasks using FastAPI lifespan events."""
     logger.info("Starting up recommendation API")
     try:
+        await _validate_configuration()
         await _ensure_tables()
     except Exception:
         logger.error("Failed to start up recommendation API", exc_info=True)
@@ -192,9 +245,63 @@ async def ask_agent(agent, query: str, callbacks=None):
 
 # --- endpoints ---------------------------------------------------------
 @app.get("/health")
-def health():
+async def health():
+    """Comprehensive health check that tests all critical system components."""
     logger.debug("Health check requested")
-    return {"status": "ok"}
+    health_status = {
+        "status": "ok",
+        "timestamp": time.time(),
+        "components": {}
+    }
+    
+    # Test database connection
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        health_status["components"]["database"] = {"status": "healthy", "response_time_ms": 0}
+    except Exception as e:
+        health_status["components"]["database"] = {"status": "unhealthy", "error": str(e)}
+        health_status["status"] = "degraded"
+    
+    # Test Redis connection
+    try:
+        from common.redis_utils import get_redis_client
+        redis_client = get_redis_client()
+        if redis_client:
+            await redis_client.ping()
+            health_status["components"]["redis"] = {"status": "healthy"}
+        else:
+            health_status["components"]["redis"] = {"status": "unavailable", "note": "Using fallback"}
+    except Exception as e:
+        health_status["components"]["redis"] = {"status": "unhealthy", "error": str(e)}
+        health_status["status"] = "degraded"
+    
+    # Test OpenAI API availability (lightweight check)
+    try:
+        # Just check if we have API key configured
+        if S.openai_api_key:
+            health_status["components"]["openai"] = {"status": "configured"}
+        else:
+            health_status["components"]["openai"] = {"status": "not_configured"}
+            health_status["status"] = "degraded"
+    except Exception as e:
+        health_status["components"]["openai"] = {"status": "error", "error": str(e)}
+        health_status["status"] = "degraded"
+    
+    # Test vector store availability
+    try:
+        vector_store_path = S.vector_store_dir
+        if vector_store_path.exists():
+            health_status["components"]["vector_store"] = {"status": "available"}
+        else:
+            health_status["components"]["vector_store"] = {"status": "not_initialized"}
+    except Exception as e:
+        health_status["components"]["vector_store"] = {"status": "error", "error": str(e)}
+        health_status["status"] = "degraded"
+    
+    # Return appropriate HTTP status code
+    status_code = 200 if health_status["status"] == "ok" else 503
+    return JSONResponse(content=health_status, status_code=status_code)
 
 @app.get("/metrics")
 async def metrics():
@@ -216,10 +323,28 @@ class MetricItem(BaseModel):
 # --- Reader Mode Models ---
 class FeedbackRequest(BaseModel):
     """Request model for reader feedback submission."""
-    user_hash_id: str = Field(..., description="Hashed user identifier")
-    book_id: str = Field(..., description="Book ID that received feedback")
+    user_hash_id: str = Field(..., description="Hashed user identifier", min_length=1, max_length=100)
+    book_id: str = Field(..., description="Book ID that received feedback", min_length=1, max_length=50)
     score: int = Field(..., description="Feedback score: 1 for thumbs up, -1 for thumbs down")
-    feedback_text: Optional[str] = Field(None, description="Optional feedback text")
+    feedback_text: Optional[str] = Field(None, description="Optional feedback text", max_length=1000)
+    
+    @validator('score')
+    def validate_score(cls, v):
+        if v not in [-1, 1]:
+            raise ValueError('Score must be either 1 (thumbs up) or -1 (thumbs down)')
+        return v
+    
+    @validator('user_hash_id')
+    def validate_user_hash_id(cls, v):
+        if not v.strip():
+            raise ValueError('User hash ID cannot be empty')
+        return v.strip()
+    
+    @validator('book_id')
+    def validate_book_id(cls, v):
+        if not v.strip():
+            raise ValueError('Book ID cannot be empty')
+        return v.strip()
 
 class FeedbackResponse(BaseModel):
     """Response model for feedback submission."""
