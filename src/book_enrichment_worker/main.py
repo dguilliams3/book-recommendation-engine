@@ -15,6 +15,8 @@ from common.tools import readability_formula_estimator
 from common.events import BookUpdatedEvent, BOOK_EVENTS_TOPIC
 from common.kafka_utils import publish_event
 from openai import AsyncOpenAI
+from openai import OpenAIError, RateLimitError, APIConnectionError, APITimeoutError
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 logger = get_logger(__name__)
 
@@ -36,11 +38,13 @@ async def _get_openai_client() -> AsyncOpenAI:
     return _openai_client
 
 
-async def llm_description(title: str, author: str | None, genres: list[str], year: str | int | None) -> str | None:
-    """Call the LLM once to generate a <=50-word spoiler-free description.
-
-    Returns None on failure or if the model responds with UNKNOWN.
-    """
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=10),
+    retry=retry_if_exception_type((RateLimitError, APIConnectionError, APITimeoutError))
+)
+async def _llm_description_with_retry(title: str, author: str | None, genres: list[str], year: str | int | None) -> str | None:
+    """Call the LLM with retry logic for transient failures."""
     # Build prompt – keep it deterministic and safe
     genres_str = ", ".join(genres) if genres else "unknown"
     prompt = (
@@ -53,25 +57,65 @@ async def llm_description(title: str, author: str | None, genres: list[str], yea
         f"Published: {year if year else 'unknown'}"
     )
 
-    try:
-        oc = await _get_openai_client()
-        rsp = await oc.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=80,
-            temperature=0.7,
-        )
-        desc = rsp.choices[0].message.content.strip()
-        if desc.upper().startswith("UNKNOWN"):
-            return None
-        # Word count guard – naive split is fine
-        if 20 <= len(desc.split()) <= 60:
-            return desc
-        # Otherwise truncate politely
-        return " ".join(desc.split()[:55]) + "..."
-    except Exception:
-        logger.warning("LLM description generation failed", exc_info=True, extra={"title": title})
+    oc = await _get_openai_client()
+    rsp = await oc.chat.completions.create(
+        model=LLM_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=80,
+        temperature=0.7,
+    )
+    desc = rsp.choices[0].message.content.strip()
+    if desc.upper().startswith("UNKNOWN"):
         return None
+    # Word count guard – naive split is fine
+    if 20 <= len(desc.split()) <= 60:
+        return desc
+    # Otherwise truncate politely
+    return " ".join(desc.split()[:55]) + "..."
+
+async def llm_description(title: str, author: str | None, genres: list[str], year: str | int | None) -> str | None:
+    """Call the LLM to generate a <=50-word spoiler-free description with circuit breaker pattern.
+
+    Returns None on failure or if the model responds with UNKNOWN.
+    """
+    try:
+        return await _llm_description_with_retry(title, author, genres, year)
+    except RateLimitError as e:
+        logger.warning("OpenAI rate limit exceeded", extra={
+            "title": title,
+            "error": str(e),
+            "retry_after": getattr(e, 'retry_after', None)
+        })
+        # Wait for rate limit reset if specified
+        if hasattr(e, 'retry_after') and e.retry_after:
+            await asyncio.sleep(min(e.retry_after, 60))  # Cap at 60 seconds
+        return None
+    except APIConnectionError as e:
+        logger.warning("OpenAI API connection error", extra={
+            "title": title,
+            "error": str(e)
+        })
+        return None
+    except APITimeoutError as e:
+        logger.warning("OpenAI API timeout", extra={
+            "title": title,
+            "error": str(e)
+        })
+        return None
+    except OpenAIError as e:
+        logger.error("OpenAI API error", extra={
+            "title": title,
+            "error": str(e),
+            "error_type": type(e).__name__
+        })
+        return None
+    except Exception as e:
+        logger.error("Unexpected error in description generation", exc_info=True, extra={
+            "title": title,
+            "error": str(e)
+        })
+        # Fallback to basic description
+        return f"Book: {title}" if title else None
 
 async def google_books(isbn, session):
     logger.debug("Fetching from Google Books", extra={"isbn": isbn})

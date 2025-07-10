@@ -4,4 +4,5 @@ asyncpg>=0.29.0
 textstat>=0.7.3
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
-openai>=1.10.0 
+openai>=1.10.0
+tenacity>=8.2.0 
