@@ -12,7 +12,7 @@ from common.structured_logging import get_logger
 
 logger = get_logger(__name__)
 
-VECTOR_DIR = Path("data/vector_store")
+VECTOR_DIR = S.vector_store_dir
 VECTOR_DIR.mkdir(parents=True, exist_ok=True)
 LOCK_FILE = VECTOR_DIR / "index.lock"
 

@@ -1,11 +1,12 @@
 from pathlib import Path
 from sqlalchemy import text
 from common.structured_logging import get_logger
+from common.settings import SettingsInstance as S
 
 logger = get_logger(__name__)
 
 async def _bootstrap_schema(engine):
-    sql_dir = Path("sql")
+    sql_dir = S.sql_dir
     sql_files = sorted(sql_dir.glob("*.sql"))
     logger.info("Bootstrapping database schema", extra={"sql_files": [str(f) for f in sql_files]})
     try:

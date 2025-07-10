@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from common import SettingsInstance as S
 from common.structured_logging import get_logger
-from recommendation_api.tools import readability_formula_estimator
+from common.tools import readability_formula_estimator
 from common.events import BookUpdatedEvent, BOOK_EVENTS_TOPIC
 from common.kafka_utils import publish_event
 from openai import AsyncOpenAI

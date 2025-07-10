@@ -34,7 +34,7 @@ EMB = OpenAIEmbeddings(
 
 # Debouncing for event-triggered refreshes
 _refresh_task: Optional[asyncio.Task] = None
-_refresh_delay = 30  # seconds to wait after last event before refreshing
+_refresh_delay = S.graph_refresh_delay_seconds  # seconds to wait after last event before refreshing
 
 async def debounced_refresh():
     """Debounced refresh that waits for events to settle before running."""

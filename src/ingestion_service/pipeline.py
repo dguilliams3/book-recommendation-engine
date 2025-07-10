@@ -53,7 +53,7 @@ async def run_ingestion():
     dragging along CLI/async setup code.
     """
 
-    vec_dir = S.data_dir / "vector_store"
+    vec_dir = S.vector_store_dir
     vec_dir.mkdir(parents=True, exist_ok=True)
 
     embeddings = OpenAIEmbeddings(api_key=S.openai_api_key, model=S.embedding_model)
@@ -65,14 +65,7 @@ async def run_ingestion():
         logger.info("FAISS index loaded", extra={"index_size": store.index.ntotal})
 
     # Database engine ---------------------------------------------------------
-    db_url_str = str(S.db_url)
-    # Ensure we have an asyncpg driver URL for SQLAlchemy
-    if db_url_str.startswith("postgresql://"):
-        async_db_url = db_url_str.replace("postgresql://", "postgresql+asyncpg://")
-    elif db_url_str.startswith("postgresql+psycopg2://"):
-        async_db_url = db_url_str.replace("postgresql+psycopg2://", "postgresql+asyncpg://")
-    else:
-        async_db_url = db_url_str
+    async_db_url = S.async_db_url
 
     engine = create_async_engine(async_db_url, echo=False)
     await _bootstrap_schema(engine)
@@ -85,7 +78,7 @@ async def run_ingestion():
         book_metadatas: list[dict] = []
         flattener = BookFlattener()
         book_count = 0
-        for row in _load_csv(Path("data/catalog_sample.csv")):
+        for row in _load_csv(S.catalog_csv_path):
             try:
                 # normalise genre/keywords to JSON strings
                 for field in ["genre", "keywords"]:
@@ -173,10 +166,12 @@ async def run_ingestion():
 
         # -------- students ---------------------------------------------------
         student_count = 0
-        for row in _load_csv(Path("data/students_sample.csv")):
+        student_failures = 0
+        for row in _load_csv(S.students_csv_path):
             try:
                 stu = models.StudentRecord(**row)
-                await sess.execute(
+                logger.debug(f"Inserting student {stu.student_id}")
+                result = await sess.execute(
                     text(
                         "INSERT INTO students VALUES(:student_id,:grade,:age,:teacher,:score,:lunch) "
                         "ON CONFLICT(student_id) DO UPDATE SET grade_level=EXCLUDED.grade_level, age=EXCLUDED.age, homeroom_teacher=EXCLUDED.homeroom_teacher, prior_year_reading_score=EXCLUDED.prior_year_reading_score, lunch_period=EXCLUDED.lunch_period"
@@ -191,9 +186,11 @@ async def run_ingestion():
                     },
                 )
                 student_count += 1
-            except Exception:
-                logger.error("Failed to process student row", exc_info=True)
-        logger.info("Students processed", extra={"count": student_count})
+                logger.debug(f"✓ Student {stu.student_id} inserted successfully")
+            except Exception as e:
+                student_failures += 1
+                logger.error(f"Failed to process student row {row.get('student_id', 'unknown')}: {e}", exc_info=True)
+        logger.info("Students processed", extra={"count": student_count, "failures": student_failures})
 
         if student_count:
             await publish_event(
@@ -207,7 +204,7 @@ async def run_ingestion():
 
         # -------- checkouts --------------------------------------------------
         checkout_count = 0
-        for row in _load_csv(Path("data/checkouts_sample.csv")):
+        for row in _load_csv(S.checkouts_csv_path):
             try:
                 chk = models.CheckoutRecord(**row)
                 await sess.execute(
@@ -232,6 +229,10 @@ async def run_ingestion():
                 )
             except Exception:
                 logger.error("Failed checkout row", exc_info=True)
+                try:
+                    await sess.rollback()
+                except Exception:
+                    logger.error("Session rollback failed", exc_info=True)
         logger.info("Checkouts processed", extra={"count": checkout_count})
 
         await sess.commit()
