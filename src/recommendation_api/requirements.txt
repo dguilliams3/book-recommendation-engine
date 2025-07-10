@@ -18,3 +18,4 @@ pydantic>=2.5.0
 pydantic-settings>=2.1.0
 faiss-cpu
 redis>=5.0.0
+slowapi>=0.1.9

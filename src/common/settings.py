@@ -92,6 +92,12 @@ class Settings(BaseSettings):
 
     # Redis (optional) - use redis:6379 for Docker, localhost:6379 for local
     redis_url: str = Field(os.getenv("REDIS_URL", "redis://redis:6379/0"), validation_alias="REDIS_URL")
+    redis_max_connections: int = Field(20, validation_alias="REDIS_MAX_CONNECTIONS")
+    redis_connection_timeout: int = Field(30, validation_alias="REDIS_CONNECTION_TIMEOUT")
+    
+    # Database connection pool settings
+    db_pool_size: int = Field(10, validation_alias="DB_POOL_SIZE")
+    db_max_overflow: int = Field(20, validation_alias="DB_MAX_OVERFLOW")
 
     # batch parameters
     similarity_threshold: float = Field(0.75, validation_alias="SIMILARITY_THRESHOLD")

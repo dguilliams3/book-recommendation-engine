@@ -8,11 +8,12 @@ Nightly job (<60 s CPU) that:
 
 Now also listens for book added events to trigger refresh.
 """
-import asyncio, json, math, time, uuid, sys
+import asyncio, json, math, time, uuid, sys, gc
 from datetime import date, timedelta
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional
+from contextlib import asynccontextmanager
 
 # Add src to Python path so we can find the common module when run directly
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -68,6 +69,16 @@ async def handle_book_event(event_data: dict):
 
 def half_life_weight(days: int) -> float:
     return 0.5 ** (days / S.half_life_days)
+
+@asynccontextmanager
+async def managed_vector_processing(batch_size: int = 100):
+    """Context manager for explicit memory management during vector processing."""
+    try:
+        yield batch_size
+    finally:
+        # Force garbage collection to free memory
+        gc.collect()
+        logger.debug("Memory cleanup completed")
 
 async def fetch_events(conn):
     window_start = date.today() - timedelta(days=S.half_life_days * 4)
@@ -169,24 +180,39 @@ async def main():
     
     logger.info("Generated embedding documents", extra={"document_count": len(docs)})
 
-    # Generate embeddings
+    # Generate embeddings with memory management
     logger.info("Generating embeddings with OpenAI")
-    try:
-        vectors = EMB.embed_documents(docs)
-        logger.info("Embeddings generated successfully", extra={
-            "vector_count": len(vectors),
-            "vector_dimension": len(vectors[0]) if vectors else 0
-        })
-        # Debug: Check what vectors actually contains
-        logger.info("Debug vectors info", extra={
-            "vectors_type": type(vectors).__name__,
-            "vectors_truthy": bool(vectors),
-            "vectors_length": len(vectors) if vectors else "N/A",
-            "first_vector_length": len(vectors[0]) if vectors and len(vectors) > 0 else "N/A"
-        })
-    except Exception as e:
-        logger.error("Failed to generate embeddings", exc_info=True)
-        raise
+    vectors = None
+    async with managed_vector_processing() as batch_size:
+        try:
+            # Process in batches to avoid memory pressure
+            if len(docs) > batch_size:
+                logger.info("Processing embeddings in batches", extra={
+                    "total_docs": len(docs),
+                    "batch_size": batch_size
+                })
+                vectors = []
+                for i in range(0, len(docs), batch_size):
+                    batch = docs[i:i + batch_size]
+                    batch_vectors = EMB.embed_documents(batch)
+                    vectors.extend(batch_vectors)
+                    # Explicit cleanup of batch data
+                    del batch_vectors, batch
+                    gc.collect()
+                    logger.debug("Batch processed", extra={
+                        "batch_num": i // batch_size + 1,
+                        "total_batches": (len(docs) + batch_size - 1) // batch_size
+                    })
+            else:
+                vectors = EMB.embed_documents(docs)
+            
+            logger.info("Embeddings generated successfully", extra={
+                "vector_count": len(vectors),
+                "vector_dimension": len(vectors[0]) if vectors else 0
+            })
+        except Exception as e:
+            logger.error("Failed to generate embeddings", exc_info=True)
+            raise
 
     # Always create the similarity table first (doesn't require vectors)
     logger.info("Setting up similarity table")
@@ -249,6 +275,11 @@ async def main():
             rows_to_insert,
         )
         logger.info("Student embeddings inserted successfully", extra={"embedding_count": len(keys)})
+        
+        # Clean up large vectors from memory
+        del vectors, rows_to_insert
+        gc.collect()
+        logger.debug("Vector memory cleaned up after database insertion")
     except Exception as e:
         logger.error("Failed to insert embeddings", exc_info=True)
         raise

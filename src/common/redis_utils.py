@@ -32,10 +32,21 @@ async def _init() -> Optional["redis.Redis"]:
     if _redis_client is not None:
         return _redis_client
     try:
-        _redis_client = await redis.from_url(S.redis_url, encoding="utf-8", decode_responses=True)
+        _redis_client = await redis.from_url(
+            S.redis_url, 
+            encoding="utf-8", 
+            decode_responses=True,
+            max_connections=S.redis_max_connections,
+            socket_timeout=S.redis_connection_timeout,
+            socket_connect_timeout=S.redis_connection_timeout
+        )
         # test connection
         await _redis_client.ping()
-        logger.info("Redis connection established", extra={"url": S.redis_url})
+        logger.info("Redis connection established", extra={
+            "url": S.redis_url,
+            "max_connections": S.redis_max_connections,
+            "timeout": S.redis_connection_timeout
+        })
     except Exception:  # noqa: BLE001
         logger.warning("Redis unavailable, falling back to in-process sets", exc_info=True)
         _redis_client = None
@@ -75,7 +86,14 @@ def get_redis_client():
         logger.warning("Redis not available, using fallback")
         return None
     try:
-        return redis.from_url(S.redis_url, encoding="utf-8", decode_responses=True)
+        return redis.from_url(
+            S.redis_url, 
+            encoding="utf-8", 
+            decode_responses=True,
+            max_connections=S.redis_max_connections,
+            socket_timeout=S.redis_connection_timeout,
+            socket_connect_timeout=S.redis_connection_timeout
+        )
     except Exception:
         logger.warning("Failed to create Redis client", exc_info=True)
         return None 
