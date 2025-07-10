@@ -2,7 +2,7 @@ import asyncio, json, os, uuid, time, sys
 from fastapi import FastAPI, HTTPException, Request, Query
 from starlette.responses import JSONResponse
 from mcp import StdioServerParameters, stdio_client, ClientSession
-from common import SettingsInstance as S
+from common.settings import settings as S
 from common.structured_logging import get_logger, SERVICE_NAME
 from common.settings import settings
 from langchain.prompts import ChatPromptTemplate

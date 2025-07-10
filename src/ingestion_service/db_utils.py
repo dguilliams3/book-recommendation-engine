@@ -1,7 +1,7 @@
 from pathlib import Path
 from sqlalchemy import text
 from common.structured_logging import get_logger
-from common.settings import SettingsInstance as S
+from common.settings import settings as S
 
 logger = get_logger(__name__)
 

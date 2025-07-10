@@ -2,7 +2,7 @@ import asyncio
 from pathlib import Path
 
 import typer
-from common.settings import SettingsInstance as S
+from common.settings import settings as S
 
 # Import the async entry-points of the three worker jobs using relative imports
 from .ingestion_service.main import ingest as _ingest_job

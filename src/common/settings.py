@@ -106,10 +106,11 @@ class Settings(BaseSettings):
 
     # service ports (overridable) ---------------------------------------
     ingestion_port: int = 8001
-    api_port: int = 8000
+    recommendation_api_port: int = 8000
     streamlit_port: int = 8501
     metrics_consumer_port: int = 8003
     prometheus_port: int = 9090
+    user_ingest_port: int = 8004
 
     # UI configuration ----------------------------------------------------
     ui_api_timeout_seconds: int = Field(30, validation_alias="UI_API_TIMEOUT")

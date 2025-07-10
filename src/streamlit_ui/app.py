@@ -15,8 +15,7 @@ import streamlit as st
 from aiokafka import AIOKafkaConsumer
 from sqlalchemy import create_engine, text
 
-from common import SettingsInstance as S
-from common.settings import settings
+from common.settings import settings as S
 from common.redis_utils import get_redis_client
 from common.structured_logging import get_logger
 
@@ -49,7 +48,7 @@ def upload_books_to_reader_api(user_identifier: str, books: List[Dict[str, Any]]
     })
     
     try:
-        upload_url = f"http://user_ingest_service:8004/upload_books"
+        upload_url = f"http://user_ingest_service:{S.user_ingest_port}/upload_books"
         payload = {
             "user_identifier": user_identifier,
             "books": books

@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import aiokafka, asyncpg
 from langchain_openai import OpenAIEmbeddings
-from common import SettingsInstance as S
+from common.settings import settings as S
 from common.structured_logging import get_logger
 from common.kafka_utils import KafkaEventConsumer, publish_event
 from common.events import BOOK_EVENTS_TOPIC

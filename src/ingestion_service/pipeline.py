@@ -14,7 +14,7 @@ from langchain_openai import OpenAIEmbeddings
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy import text
 
-from common.settings import SettingsInstance as S
+from common.settings import settings as S
 from common import models
 from common.structured_logging import get_logger
 from common.kafka_utils import publish_event
@@ -112,8 +112,8 @@ async def run_ingestion():
 
                 await sess.execute(
                     text(
-                        """INSERT INTO catalog(book_id,isbn,title,author,genre,keywords,description,page_count,publication_year,difficulty_band,reading_level,average_student_rating)
-                            VALUES(:book_id,:isbn,:title,:author,:genre,:keywords,:description,:page_count,:publication_year,:difficulty_band,:reading_level,:average_student_rating)
+                        """INSERT INTO catalog(book_id,isbn,title,author,genre,keywords,description,page_count,publication_year,difficulty_band,reading_level,average_rating)
+                            VALUES(:book_id,:isbn,:title,:author,:genre,:keywords,:description,:page_count,:publication_year,:difficulty_band,:reading_level,:average_rating)
                             ON CONFLICT(book_id) DO UPDATE SET
                                 isbn=EXCLUDED.isbn,
                                 author=EXCLUDED.author,
@@ -124,7 +124,7 @@ async def run_ingestion():
                                 publication_year=COALESCE(EXCLUDED.publication_year, catalog.publication_year),
                                 difficulty_band=COALESCE(EXCLUDED.difficulty_band, catalog.difficulty_band),
                                 reading_level=COALESCE(EXCLUDED.reading_level, catalog.reading_level),
-                                average_student_rating=EXCLUDED.average_student_rating"""
+                                average_rating=EXCLUDED.average_rating"""
                     ),
                     {
                         "book_id": item.book_id,
@@ -138,7 +138,7 @@ async def run_ingestion():
                         "publication_year": item.publication_year,
                         "difficulty_band": item.difficulty_band,
                         "reading_level": rl,
-                        "average_student_rating": item.average_student_rating,
+                        "average_rating": item.average_student_rating,
                     },
                 )
 

@@ -15,7 +15,7 @@ try:
 except ImportError:  # pragma: no cover – optional dependency
     redis = None  # type: ignore
 
-from . import SettingsInstance as S
+from .settings import settings as S
 from .structured_logging import get_logger
 
 logger = get_logger(__name__)
