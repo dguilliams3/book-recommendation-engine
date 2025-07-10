@@ -41,7 +41,7 @@ from common.performance import (
     cached, performance_context, get_cache, get_connection_pool,
     get_performance_monitor, BatchProcessor
 )
-from .prompts import build_prompt, parser
+from .prompts import build_student_prompt, build_reader_prompt, parser
 from .scoring import score_candidates
 from .candidate_builder import build_candidates
 from common.redis_utils import mark_recommended
@@ -135,7 +135,9 @@ async def get_db_connection():
 async def _get_student_context_cached(student_id: str) -> Tuple[float, List[str], List[str], dict]:
     """Cached version of student context retrieval."""
     async with performance_context(f"student_context:{student_id}") as monitor:
-        async with engine.begin() as conn:
+        conn = None
+        try:
+            conn = await engine.begin()
             rows = await conn.execute(
                 text("""
                      SELECT c.title, c.reading_level, c.genre
@@ -176,12 +178,21 @@ async def _get_student_context_cached(student_id: str) -> Tuple[float, List[str]
             band_hist = dict(Counter(_level_to_band(lv) for lv in levels))
 
             return avg_level, recent_titles, top_genres, band_hist
+        except Exception as e:
+            logger.error(f"Database error in student context fetch: {e}", exc_info=True, extra={"student_id": student_id})
+            # Return sensible defaults on error
+            return None, [], [], {}
+        finally:
+            if conn:
+                await conn.close()
 
 @cached(ttl=600, cache_key_prefix="user_uploaded_books")
 async def _fetch_user_uploaded_books_cached(user_hash_id: str) -> List[dict]:
     """Cached version of user uploaded books retrieval."""
     async with performance_context(f"user_books:{user_hash_id}") as monitor:
-        async with engine.begin() as conn:
+        conn = None
+        try:
+            conn = await engine.begin()
             result = await conn.execute(
                 text("""
                     SELECT book_id, title, author, isbn, genre, reading_level, 
@@ -209,12 +220,21 @@ async def _fetch_user_uploaded_books_cached(user_hash_id: str) -> List[dict]:
                 })
             
             return books
+        except Exception as e:
+            logger.error(f"Database error in user books fetch: {e}", exc_info=True, extra={"user_hash_id": user_hash_id})
+            # Return empty list on error
+            return []
+        finally:
+            if conn:
+                await conn.close()
 
 @cached(ttl=300, cache_key_prefix="user_feedback_scores")
 async def _fetch_user_feedback_scores_cached(user_hash_id: str) -> dict:
     """Cached version of user feedback scores retrieval."""
     async with performance_context(f"user_feedback:{user_hash_id}") as monitor:
-        async with engine.begin() as conn:
+        conn = None
+        try:
+            conn = await engine.begin()
             result = await conn.execute(
                 text("""
                     SELECT book_id, feedback_type, COUNT(*) as count
@@ -232,6 +252,13 @@ async def _fetch_user_feedback_scores_cached(user_hash_id: str) -> dict:
                 scores[row.book_id][row.feedback_type] = row.count
             
             return scores
+        except Exception as e:
+            logger.error(f"Database error in feedback scores fetch: {e}", exc_info=True, extra={"user_hash_id": user_hash_id})
+            # Return empty dict on error
+            return {}
+        finally:
+            if conn:
+                await conn.close()
 
 # ---------------------------------------------------------------------------
 # Public helper
@@ -710,3 +737,142 @@ async def _ask_agent(agent, prompt_messages, callbacks=None):
     response = await agent.ainvoke({"messages": prompt_messages}, config=cfg)
     final_msg = next(m for m in reversed(response["messages"]) if isinstance(m, AIMessage))
     return final_msg, response 
+
+async def generate_agent_recommendations(
+    mode: str,  # "student" or "reader"
+    context: dict,
+    query: str,
+    n: int,
+    request_id: str,
+) -> Tuple[List[BookRecommendation], dict[str, Any]]:
+    """Unified agent-based recommendation function for both Student and Reader modes."""
+    logger.info("Starting agent-based recommendation", extra={
+        "request_id": request_id,
+        "mode": mode,
+        "n": n,
+        "query": query
+    })
+    start_ts = time.perf_counter()
+    
+    try:
+        # Setup MCP session and tools (same as existing student function)
+        async with stdio_client(server_params) as (read, write):
+            logger.debug("MCP stdio tunnel established", extra={"request_id": request_id})
+
+            async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=300)) as session:
+                await session.initialize()
+                logger.debug("MCP session initialised", extra={"request_id": request_id})
+
+                lc_tools = await load_mcp_tools(session)
+                agent = create_react_agent(chat_model, lc_tools, name="BookRecommenderAgent")
+
+                # Build prompt based on mode
+                if mode == "student":
+                    prompt_messages = build_student_prompt(
+                        student_id=context["student_id"],
+                        query=query,
+                        candidates=context["candidates"],
+                        avg_level=context["avg_level"],
+                        recent_titles=context["recent_titles"],
+                        top_genres=context["top_genres"],
+                        band_hist=context["band_hist"],
+                        n=n,
+                    )
+                elif mode == "reader":
+                    prompt_messages = build_reader_prompt(
+                        user_hash_id=context["user_hash_id"],
+                        query=query,
+                        uploaded_books=context["uploaded_books"],
+                        feedback_scores=context["feedback_scores"],
+                        candidates=context["candidates"],
+                        n=n,
+                    )
+                else:
+                    raise ValueError(f"Unknown mode: {mode}")
+
+                # Ask agent
+                logger.debug("Calling LLM agent", extra={"request_id": request_id})
+                callbacks = [MetricCallbackHandler()]
+                agent_response = await _ask_agent(agent, prompt_messages, callbacks)
+
+                # Parse agent response
+                try:
+                    parsed_recs = parser.parse(agent_response)
+                    valid_recs = [r for r in parsed_recs if r.book_id != "ERROR"]
+                    
+                    if not valid_recs:
+                        logger.warning("No valid recommendations parsed", extra={"request_id": request_id})
+                        # Return fallback recommendations
+                        async with engine.begin() as conn:
+                            valid_recs = await _get_fallback_recommendations(n, conn)
+                        
+                except Exception as e:
+                    logger.error("Failed to parse agent response", exc_info=True, extra={"request_id": request_id})
+                    # Return fallback recommendations
+                    async with engine.begin() as conn:
+                        valid_recs = await _get_fallback_recommendations(n, conn)
+
+                # Mark as recommended (fire-and-forget) for student mode
+                if mode == "student":
+                    try:
+                        book_ids = [r.book_id for r in valid_recs]
+                        await mark_recommended(context["student_id"], book_ids, ttl_hours=24)
+                    except Exception as e:
+                        logger.warning("Failed to mark books as recommended", exc_info=True, extra={"request_id": request_id})
+
+                # Collect metrics
+                duration = time.perf_counter() - start_ts
+                cb = callbacks[0] if callbacks else MetricCallbackHandler()
+                
+                metrics = {
+                    "agent_duration": duration,
+                    "tool_count": len(cb.tools_used),
+                    "tools": cb.tools_used,
+                    "error_count": cb.error_count,
+                    "mode": mode,
+                    "cache_enabled": True,
+                    "performance_optimized": True
+                }
+
+                logger.info("Agent-based recommendation completed", extra={
+                    "request_id": request_id,
+                    "mode": mode,
+                    "duration_sec": duration,
+                    "recommendations_count": len(valid_recs),
+                    "tools_used": cb.tools_used,
+                    "error_count": cb.error_count
+                })
+
+                return valid_recs, metrics
+                
+    except Exception as exc:
+        duration = time.perf_counter() - start_ts
+        logger.error("Agent-based recommendation failed", extra={
+            "request_id": request_id,
+            "mode": mode,
+            "duration_sec": duration,
+            "error": str(exc)
+        }, exc_info=True)
+        
+        # Return fallback recommendations on error
+        try:
+            async with engine.begin() as conn:
+                fallback_recs = await _get_fallback_recommendations(n, conn)
+                return fallback_recs, {
+                    "agent_duration": duration,
+                    "tool_count": 0,
+                    "tools": [],
+                    "error_count": 1,
+                    "error": str(exc),
+                    "mode": mode
+                }
+        except Exception as fallback_error:
+            logger.error("Failed to get fallback recommendations", exc_info=True, extra={"request_id": request_id})
+            return [], {
+                "agent_duration": duration,
+                "tool_count": 0,
+                "tools": [],
+                "error_count": 1,
+                "error": str(exc),
+                "mode": mode
+            } 
