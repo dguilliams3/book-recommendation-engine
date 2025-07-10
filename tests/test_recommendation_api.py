@@ -14,7 +14,14 @@ def client(monkeypatch):
 
     async def _fake_generate(student_id, query, n, request_id):
         # Very small deterministic result set
-        recs = [BookRecommendation(book_id="b42", title="Test Book", librarian_blurb="Enjoy!")]
+        recs = [BookRecommendation(
+            book_id="b42", 
+            title="Test Book", 
+            author="Test Author",
+            reading_level=3.5,
+            librarian_blurb="Enjoy!",
+            justification="Great book for testing"
+        )]
         meta = {"tool_count": 0}
         return recs, meta
 

@@ -13,14 +13,19 @@ import requests
 import asyncpg
 import json
 from pathlib import Path
+import sys
+
+# Add src to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from common.settings import SettingsInstance as S
 
 # Test configuration
 SERVICES = {
-    "recommendation_api": {"url": "http://localhost:8000", "critical": True},
-    "streamlit_ui": {"url": "http://localhost:8501", "critical": True},
-    "prometheus": {"url": "http://localhost:9090", "critical": False},
-    "postgres": {"host": "localhost", "port": 5432, "critical": True},
-    "redis": {"host": "localhost", "port": 6379, "critical": False},
+    "recommendation_api": {"url": f"http://localhost:{S.recommendation_api_port}", "critical": True},
+    "streamlit_ui": {"url": f"http://localhost:{S.streamlit_port}", "critical": True},
+    "prometheus": {"url": f"http://localhost:{S.prometheus_port}", "critical": False},
+    "postgres": {"host": S.db_host, "port": S.db_port, "critical": True},
+    "redis": {"host": S.redis_host, "port": S.redis_port, "critical": False},
 }
 
 class SystemTester:
@@ -101,9 +106,9 @@ class SystemTester:
             conn = await asyncpg.connect(
                 host=SERVICES[service]["host"],
                 port=SERVICES[service]["port"],
-                user="books",
-                password="books",
-                database="books"
+                user=S.db_user,
+                password=S.db_password,
+                database=S.db_name
             )
             
             # Test basic connectivity
