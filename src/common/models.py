@@ -40,7 +40,7 @@ class Catalog(Base):
     publication_year = Column(Integer)
     difficulty_band = Column(String)
     reading_level = Column(Float)  # NUMERIC(4,2)
-    average_student_rating = Column(Float)  # NUMERIC(3,2)
+    average_rating = Column(Float)  # NUMERIC(3,2)
 
 class Checkout(Base):
     """Student book checkout/return history with ratings"""
@@ -140,7 +140,7 @@ Index('idx_checkout_book_id', Checkout.book_id)
 Index('idx_checkout_checkout_id', Checkout.checkout_id)
 Index('idx_catalog_reading_level', Catalog.reading_level)
 Index('idx_catalog_genre', Catalog.genre)
-Index('idx_catalog_rating', Catalog.average_student_rating)
+Index('idx_catalog_rating', Catalog.average_rating)
 Index('idx_students_grade', Student.grade_level)
 Index('idx_students_teacher', Student.homeroom_teacher)
 Index('idx_similarity_score', StudentSimilarity.sim.desc())
@@ -201,7 +201,7 @@ class BookCatalogItem(_RecordModel):
     publication_year: Optional[int] = None
     difficulty_band: Optional[str] = None
     reading_level: Optional[float] = None
-    average_student_rating: Optional[float] = None
+    average_rating: Optional[float] = None
 
     # ----------------------------- validators ----------------------------
 

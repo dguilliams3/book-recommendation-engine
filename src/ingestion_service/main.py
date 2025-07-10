@@ -16,7 +16,7 @@ from langchain_openai import OpenAIEmbeddings
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy import text
 
-from common.settings import SettingsInstance as S
+from common.settings import settings as S
 from common import models
 from common.structured_logging import get_logger
 from common.kafka_utils import publish_event

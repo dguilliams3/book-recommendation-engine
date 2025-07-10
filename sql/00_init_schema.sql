@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS catalog (
     publication_year INT,
     difficulty_band TEXT,
     reading_level NUMERIC(4,2),          -- Added from 02_add_reading_level.sql
-    average_student_rating NUMERIC(3,2)
+    average_rating NUMERIC(3,2)
 );
 
 -- Checkout records - includes the checkout_id column from the start
@@ -117,7 +117,7 @@ CREATE INDEX IF NOT EXISTS idx_catalog_reading_level ON catalog(reading_level);
 
 -- Performance indexes for recommendations
 CREATE INDEX IF NOT EXISTS idx_catalog_genre ON catalog(genre);
-CREATE INDEX IF NOT EXISTS idx_catalog_rating ON catalog(average_student_rating);
+CREATE INDEX IF NOT EXISTS idx_catalog_rating ON catalog(average_rating);
 CREATE INDEX IF NOT EXISTS idx_students_grade ON students(grade_level);
 CREATE INDEX IF NOT EXISTS idx_students_teacher ON students(homeroom_teacher);
 

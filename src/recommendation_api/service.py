@@ -449,15 +449,15 @@ async def _fetch_similar_books(uploaded_books: List[dict], user_hash_id: str, co
     
     # If no specific criteria, get popular books
     if not where_conditions:
-        where_conditions.append(f"c.average_student_rating > {reader_config.MIN_RATING_THRESHOLD}")
+        where_conditions.append(f"c.average_rating > {reader_config.MIN_RATING_THRESHOLD}")
     
     similar_books_result = await conn.execute(
         text(f"""
             SELECT DISTINCT c.book_id, c.title, c.author, c.genre, c.reading_level, 
-                   c.description as librarian_blurb, c.isbn
+                   c.description as librarian_blurb, c.isbn, c.average_rating
             FROM catalog c
             WHERE {' OR '.join(where_conditions)}
-            ORDER BY c.average_student_rating DESC NULLS LAST, c.book_id
+            ORDER BY c.average_rating DESC NULLS LAST, c.book_id
             LIMIT :limit
         """),
         {**query_params, "limit": reader_config.MAX_SIMILAR_BOOKS}
@@ -472,7 +472,8 @@ async def _fetch_similar_books(uploaded_books: List[dict], user_hash_id: str, co
             "genre": row.genre,
             "reading_level": row.reading_level or 5.0,
             "librarian_blurb": row.librarian_blurb,
-            "isbn": row.isbn
+            "isbn": row.isbn,
+            "average_rating": row.average_rating
         })
     
     return similar_books
@@ -563,8 +564,8 @@ async def _get_fallback_recommendations(n: int, conn) -> List[dict]:
             SELECT c.book_id, c.title, c.author, c.genre, c.reading_level, 
                    c.description as librarian_blurb
             FROM catalog c
-            WHERE c.average_student_rating > :threshold
-            ORDER BY c.average_student_rating DESC NULLS LAST
+            WHERE c.average_rating > :threshold
+            ORDER BY c.average_rating DESC NULLS LAST
             LIMIT :n
         """),
         {"n": n, "threshold": reader_config.FALLBACK_RATING_THRESHOLD}
