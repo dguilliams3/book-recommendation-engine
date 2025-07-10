@@ -31,7 +31,7 @@ from .service import (
     generate_agent_recommendations,
 )
 from common.metrics import REQUEST_COUNTER, REQUEST_LATENCY
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Any, Optional
 from common.events import FeedbackEvent, FEEDBACK_EVENTS_TOPIC
 
@@ -328,19 +328,22 @@ class FeedbackRequest(BaseModel):
     score: int = Field(..., description="Feedback score: 1 for thumbs up, -1 for thumbs down")
     feedback_text: Optional[str] = Field(None, description="Optional feedback text", max_length=1000)
     
-    @validator('score')
+    @field_validator('score')
+    @classmethod
     def validate_score(cls, v):
         if v not in [-1, 1]:
             raise ValueError('Score must be either 1 (thumbs up) or -1 (thumbs down)')
         return v
     
-    @validator('user_hash_id')
+    @field_validator('user_hash_id')
+    @classmethod
     def validate_user_hash_id(cls, v):
         if not v.strip():
             raise ValueError('User hash ID cannot be empty')
         return v.strip()
     
-    @validator('book_id')
+    @field_validator('book_id')
+    @classmethod
     def validate_book_id(cls, v):
         if not v.strip():
             raise ValueError('Book ID cannot be empty')
