@@ -51,6 +51,36 @@ class Settings(BaseSettings):
     def kafka_bootstrap(self) -> str:
         """Get the Kafka bootstrap servers, constructed from components"""
         return self._kafka_bootstrap
+
+    # --- derived convenience paths ----------------------------------------
+    @property
+    def vector_store_dir(self) -> Path:
+        """Directory used for persisted vector store indexes."""
+        return self.data_dir / "vector_store"
+
+    @property
+    def async_db_url(self) -> str:
+        """Return SQLAlchemy URL with asyncpg driver for PostgreSQL."""
+        url = self.db_url
+        if url.startswith("postgresql://"):
+            return url.replace("postgresql://", "postgresql+asyncpg://")
+        if url.startswith("postgresql+psycopg2://"):
+            return url.replace("postgresql+psycopg2://", "postgresql+asyncpg://")
+        return url
+
+    @property
+    def redis_host(self) -> str:
+        """Extract host from redis URL."""
+        from urllib.parse import urlparse
+        parsed = urlparse(self.redis_url)
+        return parsed.hostname or "localhost"
+
+    @property
+    def redis_port(self) -> int:
+        """Extract port from redis URL."""
+        from urllib.parse import urlparse
+        parsed = urlparse(self.redis_url)
+        return parsed.port or 6379
     
     # Legacy KAFKA_BROKERS support (for backward compatibility)
     legacy_kafka_bootstrap: str | None = Field(None, validation_alias="KAFKA_BROKERS")
@@ -66,16 +96,32 @@ class Settings(BaseSettings):
     # batch parameters
     similarity_threshold: float = Field(0.75, validation_alias="SIMILARITY_THRESHOLD")
     half_life_days: int = Field(45, validation_alias="HALF_LIFE_DAYS")
+    graph_refresh_delay_seconds: int = Field(30, validation_alias="GRAPH_REFRESH_DELAY")
+
+    # data file paths -------------------------------------------------------
+    catalog_csv_path: Path = Field(Path("data/catalog_sample.csv"), validation_alias="CATALOG_CSV")
+    students_csv_path: Path = Field(Path("data/students_sample.csv"), validation_alias="STUDENTS_CSV")
+    checkouts_csv_path: Path = Field(Path("data/checkouts_sample.csv"), validation_alias="CHECKOUTS_CSV")
+    sql_dir: Path = Field(Path("sql"), validation_alias="SQL_DIR")
 
     # service ports (overridable) ---------------------------------------
     ingestion_port: int = 8001
     api_port: int = 8000
     streamlit_port: int = 8501
     metrics_consumer_port: int = 8003
+    prometheus_port: int = 9090
+
+    # UI configuration ----------------------------------------------------
+    ui_api_timeout_seconds: int = Field(30, validation_alias="UI_API_TIMEOUT")
+    ui_max_retries: int = Field(3, validation_alias="UI_MAX_RETRIES")
+    ui_quick_timeout_seconds: int = Field(15, validation_alias="UI_QUICK_TIMEOUT")
+    ui_health_timeout_seconds: int = Field(5, validation_alias="UI_HEALTH_TIMEOUT")
+    ui_kafka_timeout_seconds: float = Field(5.0, validation_alias="UI_KAFKA_TIMEOUT")
 
     # env flags for optional workers ------------------------------------
     enable_tts: bool = Field(False, validation_alias="ENABLE_TTS")
     enable_image: bool = Field(False, validation_alias="ENABLE_IMAGE")
+    enable_reader_mode: bool = Field(True, validation_alias="ENABLE_READER_MODE")  # Reader Mode feature flag
 
     # Additional optional config values
     model_max_tokens: int = Field(int(os.getenv("MODEL_MAX_TOKENS", "600")))

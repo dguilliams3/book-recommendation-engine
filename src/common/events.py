@@ -86,6 +86,37 @@ class StudentsAddedEvent(_BaseEvent):
     source: str = Field("ingestion_service")
 
 
+# ====================================================================
+# READER MODE EVENTS
+# ====================================================================
+
+class UserUploadedEvent(_BaseEvent):
+    """Event published when a reader uploads their book list."""
+    event_type: Literal["user_uploaded"] = "user_uploaded"
+    user_hash_id: str = Field(..., description="Hashed user identifier for privacy")
+    book_count: int = Field(..., description="Number of books uploaded")
+    book_ids: List[str] = Field(..., description="List of uploaded book IDs")
+    source: str = Field("user_ingest_service")
+
+
+class FeedbackEvent(_BaseEvent):
+    """Event published when reader provides feedback on recommendations."""
+    event_type: Literal["feedback_received"] = "feedback_received"
+    user_hash_id: str = Field(..., description="Hashed user identifier for privacy")
+    book_id: str = Field(..., description="Book that received feedback")
+    score: int = Field(..., description="Feedback score (+1 or -1)")
+    source: str = Field("feedback_worker")
+
+
+class BookEnrichmentTaskEvent(_BaseEvent):
+    """Dispatched by ingestion when a book lacks page_count/publication_year."""
+
+    event_type: Literal["book_enrichment_task"] = "book_enrichment_task"
+    book_id: str
+    isbn: str | None = None
+    source: str = Field("ingestion_service")
+
+
 # Topic names
 BOOK_EVENTS_TOPIC = "book_events"
 GRAPH_EVENTS_TOPIC = "graph_events"
@@ -95,11 +126,6 @@ STUDENT_PROFILE_TOPIC = "student_profile_events"
 STUDENT_EMBEDDING_TOPIC = "student_embedding_events"
 BOOK_ENRICHMENT_TASKS_TOPIC = "book_enrichment_tasks"
 
-
-class BookEnrichmentTaskEvent(_BaseEvent):
-    """Dispatched by ingestion when a book lacks page_count/publication_year."""
-
-    event_type: Literal["book_enrichment_task"] = "book_enrichment_task"
-    book_id: str
-    isbn: str | None = None
-    source: str = Field("ingestion_service") 
+# Reader Mode topics
+USER_UPLOADED_TOPIC = "user_uploaded"
+FEEDBACK_EVENTS_TOPIC = "feedback_events" 
