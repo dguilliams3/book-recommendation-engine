@@ -168,10 +168,9 @@ async def execute_with_deadlock_retry(conn, query, params=None, max_retries=3, b
 async def _get_student_context_cached(student_id: str) -> Tuple[float, List[str], List[str], dict]:
     """Cached version of student context retrieval."""
     async with performance_context(f"student_context:{student_id}") as monitor:
-        conn = None
         try:
-            conn = await engine.begin()
-            rows = await conn.execute(
+            async with engine.begin() as conn:
+                rows = await conn.execute(
                 text("""
                      SELECT c.title, c.reading_level, c.genre
                        FROM checkout co
@@ -204,20 +203,17 @@ async def _get_student_context_cached(student_id: str) -> Tuple[float, List[str]
                 if row.genre:
                     genres.append(row.genre)
 
-            avg_level = sum(levels) / len(levels) if levels else None
-            recent_titles = titles[:10]
-            top_genres = [genre for genre, _ in Counter(genres).most_common(5)]
+                avg_level = sum(levels) / len(levels) if levels else None
+                recent_titles = titles[:10]
+                top_genres = [genre for genre, _ in Counter(genres).most_common(5)]
 
-            band_hist = dict(Counter(_level_to_band(lv) for lv in levels))
+                band_hist = dict(Counter(_level_to_band(lv) for lv in levels))
 
-            return avg_level, recent_titles, top_genres, band_hist
+                return avg_level, recent_titles, top_genres, band_hist
         except Exception as e:
             logger.error(f"Database error in student context fetch: {e}", exc_info=True, extra={"student_id": student_id})
             # Return sensible defaults on error
             return None, [], [], {}
-        finally:
-            if conn:
-                await conn.close()
 
 @cached(ttl=600, cache_key_prefix="user_uploaded_books")
 async def _fetch_user_uploaded_books_cached(user_hash_id: str) -> List[dict]:
