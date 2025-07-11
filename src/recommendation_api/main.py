@@ -1,6 +1,8 @@
 import asyncio, json, os, uuid, time, sys
 from fastapi import FastAPI, HTTPException, Request, Query
-from starlette.responses import JSONResponse
+from fastapi.responses import JSONResponse
+from fastapi.responses import Response
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -305,8 +307,23 @@ async def health():
 
 @app.get("/metrics")
 async def metrics():
-    logger.debug("Metrics endpoint requested")
-    return JSONResponse({"status": "ok"})
+    """Prometheus-format metrics for scraping."""
+    from common.metrics import _PROM
+    if not _PROM:
+        return JSONResponse({"detail": "prometheus_client not installed"}, status_code=501)
+    data = generate_latest()
+    return Response(content=data, media_type=CONTENT_TYPE_LATEST)
+
+@app.get("/live")
+async def live():
+    """Liveness probe – cheap."""
+    import time
+    return {"status": "alive", "timestamp": time.time()}
+
+@app.get("/ready")
+async def ready():
+    """Readiness probe that delegates to health check."""
+    return await health()
 
 # --- Pydantic models for Swagger --------------------------------------------
 class BookRow(BaseModel, extra="allow"):
@@ -532,12 +549,15 @@ async def recommend(
         
         # Build and score candidates
         candidates = await build_candidates(student_id, n)
-        scored_candidates = await score_candidates(candidates, student_id, query)
+        scored_candidates = score_candidates(candidates)
+        
+        # Extract candidates from scored tuples (score, candidate)
+        candidate_list = [candidate for score, candidate in scored_candidates]
         
         # Build context for unified agent
         context = {
             "student_id": student_id,
-            "candidates": scored_candidates,
+            "candidates": candidate_list,
             "avg_level": avg_level,
             "recent_titles": recent_titles,
             "top_genres": top_genres,
@@ -697,11 +717,22 @@ async def get_reader_recommendations(
         uploaded_books = await _fetch_user_uploaded_books_cached(user_hash_id)
         feedback_scores = await _fetch_user_feedback_scores_cached(user_hash_id)
         
+        # Always use LLM agent for reader recommendations
         if not uploaded_books:
-            # Fall back to rule-based recommendations if no uploaded books
-            recs, meta = await generate_reader_recommendations(user_hash_id, query, n, request_id)
+            # Build fallback candidates when no uploaded books
+            from .service import _get_fallback_recommendations
+            async with engine.begin() as conn:
+                fallback_candidates = await _get_fallback_recommendations(n * 3, conn)  # Get more candidates for agent to choose from
+            
+            # Build context for unified agent (empty uploaded books)
+            context = {
+                "user_hash_id": user_hash_id,
+                "uploaded_books": [],
+                "feedback_scores": feedback_scores,
+                "candidates": fallback_candidates,
+            }
         else:
-            # Build candidates for agent-based recommendations
+            # Build candidates based on uploaded books
             from .service import _fetch_similar_books
             async with engine.begin() as conn:
                 candidates = await _fetch_similar_books(uploaded_books, user_hash_id, conn)
@@ -713,9 +744,9 @@ async def get_reader_recommendations(
                 "feedback_scores": feedback_scores,
                 "candidates": candidates,
             }
-            
-            # Use unified agent function
-            recs, meta = await generate_agent_recommendations("reader", context, query, n, request_id)
+        
+        # Always use unified agent function for LLM-based recommendations
+        recs, meta = await generate_agent_recommendations("reader", context, query, n, request_id)
         
         total_duration = time.perf_counter() - started
         

@@ -2,6 +2,8 @@ import json, sys, types
 
 import pytest
 from langchain_core.messages import AIMessage
+from unittest.mock import AsyncMock, patch
+from src.recommendation_api import service as svc
 
 # ---------------------------------------------------------------------------
 # Autouse fixture: stub heavy external dependencies BEFORE importing the service
@@ -64,12 +66,17 @@ def _patch_recommendation_deps(monkeypatch):
     monkeypatch.setitem(sys.modules, "langgraph.prebuilt", lg_prebuilt)
 
 
-@pytest.mark.asyncio
-async def test_generate_recommendations_parses_json(monkeypatch):
-    """generate_recommendations should parse a JSON list from the agent."""
+class DummyParser:
+    def __init__(self, result=None, raise_exc=False):
+        self._result = result
+        self._raise_exc = raise_exc
+    def parse(self, msg):
+        if self._raise_exc:
+            raise Exception("Not JSON")
+        return self._result
 
-    from recommendation_api import service as svc
 
+def test_generate_recommendations_parses_json(monkeypatch):
     sample_json = json.dumps([
         {
             "book_id": "b1",
@@ -84,32 +91,43 @@ async def test_generate_recommendations_parses_json(monkeypatch):
     ])
 
     async def _fake_ask(_agent, _prompt, callbacks=None):
-        # Simulate tool usage callback side-effects
         if callbacks:
             for cb in callbacks:
                 cb.tools_used.extend(["dummy_tool"])
         return AIMessage(content=sample_json), {}
 
     monkeypatch.setattr(svc, "_ask_agent", _fake_ask)
+    monkeypatch.setattr(svc, "_get_student_context_cached", AsyncMock(return_value=(4.0, ["Book1"], ["Fiction"], {})))
+    monkeypatch.setattr(svc, "build_candidates", AsyncMock(return_value=[svc.BookRecommendation(book_id="b1", title="Cat Stories", author="", reading_level=4.0, librarian_blurb="", justification=""), svc.BookRecommendation(book_id="b2", title="Dog Adventures", author="", reading_level=4.0, librarian_blurb="", justification="")]))
+    monkeypatch.setattr(svc, "score_candidates", lambda c, s, q: c)
+    monkeypatch.setattr(svc, "_get_fallback_recommendations", AsyncMock(return_value=[]))
+    monkeypatch.setattr(svc, "mark_recommended", AsyncMock())
+    monkeypatch.setattr(svc, "parser", DummyParser([
+        svc.BookRecommendation(book_id="b1", title="Cat Stories", author="", reading_level=4.0, librarian_blurb="Cute cat tales.", justification=""),
+        svc.BookRecommendation(book_id="b2", title="Dog Adventures", author="", reading_level=4.0, librarian_blurb="Exciting dog journeys.", justification="")
+    ]))
 
-    recs, meta = await svc.generate_recommendations("stu1", "cats", 2, "req1")
+    import asyncio
+    recs, meta = asyncio.run(svc.generate_recommendations("stu1", "cats", 2, "req1"))
 
     assert len(recs) == 2
     assert recs[0].book_id == "b1"
     assert meta["tool_count"] == 1
 
-
-@pytest.mark.asyncio
-async def test_generate_recommendations_handles_non_json(monkeypatch):
-    """If the agent returns non-JSON text the function should wrap it in a placeholder recommendation."""
-    from recommendation_api import service as svc
-
+def test_generate_recommendations_handles_non_json(monkeypatch):
     async def _fake_ask(_agent, _prompt, callbacks=None):
         return AIMessage(content="Some plain English answer"), {}
 
     monkeypatch.setattr(svc, "_ask_agent", _fake_ask)
+    monkeypatch.setattr(svc, "_get_student_context_cached", AsyncMock(return_value=(4.0, ["Book1"], ["Fiction"], {})))
+    monkeypatch.setattr(svc, "build_candidates", AsyncMock(return_value=[]))
+    monkeypatch.setattr(svc, "score_candidates", lambda c, s, q: c)
+    monkeypatch.setattr(svc, "_get_fallback_recommendations", AsyncMock(return_value=[svc.BookRecommendation(book_id="UNKNOWN", title="Unknown", author="", reading_level=0.0, librarian_blurb="Some plain English answer", justification="")]))
+    monkeypatch.setattr(svc, "mark_recommended", AsyncMock())
+    monkeypatch.setattr(svc, "parser", DummyParser(raise_exc=True))
 
-    recs, meta = await svc.generate_recommendations("stu2", "dinosaurs", 3, "req2")
+    import asyncio
+    recs, meta = asyncio.run(svc.generate_recommendations("stu2", "dinosaurs", 3, "req2"))
 
     assert len(recs) == 1
     assert recs[0].book_id == "UNKNOWN"

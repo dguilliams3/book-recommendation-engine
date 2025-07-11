@@ -219,10 +219,9 @@ async def _get_student_context_cached(student_id: str) -> Tuple[float, List[str]
 async def _fetch_user_uploaded_books_cached(user_hash_id: str) -> List[dict]:
     """Cached version of user uploaded books retrieval."""
     async with performance_context(f"user_books:{user_hash_id}") as monitor:
-        conn = None
         try:
-            conn = await engine.begin()
-            result = await conn.execute(
+            async with engine.begin() as conn:
+                result = await conn.execute(
                 text("""
                     SELECT book_id, title, author, isbn, genre, reading_level, 
                            user_rating, read_date, notes, created_at
@@ -232,10 +231,8 @@ async def _fetch_user_uploaded_books_cached(user_hash_id: str) -> List[dict]:
                 """),
                 {"user_hash_id": user_hash_id}
             )
-            
-            books = []
-            for row in result:
-                books.append({
+            books = [
+                {
                     "book_id": row.book_id,
                     "title": row.title,
                     "author": row.author,
@@ -245,49 +242,36 @@ async def _fetch_user_uploaded_books_cached(user_hash_id: str) -> List[dict]:
                     "user_rating": row.user_rating,
                     "read_date": row.read_date,
                     "notes": row.notes,
-                    "created_at": row.created_at
-                })
-            
+                    "created_at": row.created_at,
+                }
+                for row in result
+            ]
             return books
         except Exception as e:
-            logger.error(f"Database error in user books fetch: {e}", exc_info=True, extra={"user_hash_id": user_hash_id})
-            # Return empty list on error
+            logger.error("Database error in user books fetch: %s", e, extra={"user_hash_id": user_hash_id}, exc_info=True)
             return []
-        finally:
-            if conn:
-                await conn.close()
 
 @cached(ttl=300, cache_key_prefix="user_feedback_scores")
 async def _fetch_user_feedback_scores_cached(user_hash_id: str) -> dict:
     """Cached version of user feedback scores retrieval."""
     async with performance_context(f"user_feedback:{user_hash_id}") as monitor:
-        conn = None
         try:
-            conn = await engine.begin()
-            result = await conn.execute(
+            async with engine.begin() as conn:
+                result = await conn.execute(
                 text("""
-                    SELECT book_id, feedback_type, COUNT(*) as count
-                    FROM feedback 
-                    WHERE user_hash_id = :user_hash_id 
-                    GROUP BY book_id, feedback_type
+                    SELECT book_id, score, created_at
+                      FROM feedback
+                     WHERE user_hash_id = :user_hash_id
                 """),
                 {"user_hash_id": user_hash_id}
             )
-            
-            scores = {}
+            feedback_scores: dict[str, int] = {}
             for row in result:
-                if row.book_id not in scores:
-                    scores[row.book_id] = {"thumbs_up": 0, "thumbs_down": 0}
-                scores[row.book_id][row.feedback_type] = row.count
-            
-            return scores
+                feedback_scores[row.book_id] = feedback_scores.get(row.book_id, 0) + row.score
+            return feedback_scores
         except Exception as e:
-            logger.error(f"Database error in feedback scores fetch: {e}", exc_info=True, extra={"user_hash_id": user_hash_id})
-            # Return empty dict on error
+            logger.error("Database error in feedback scores fetch: %s", e, extra={"user_hash_id": user_hash_id}, exc_info=True)
             return {}
-        finally:
-            if conn:
-                await conn.close()
 
 # ---------------------------------------------------------------------------
 # Public helper
@@ -640,6 +624,33 @@ async def _get_fallback_recommendations(n: int, conn) -> List[dict]:
     
     return fallback_books
 
+async def _get_fallback_book_recommendations(n: int, conn) -> List[BookRecommendation]:
+    """Get popular books as fallback and convert to BookRecommendation objects."""
+    fallback_result = await conn.execute(
+        text("""
+            SELECT c.book_id, c.title, c.author, c.genre, c.reading_level, 
+                   c.description as librarian_blurb
+            FROM catalog c
+            WHERE c.average_rating > :threshold
+            ORDER BY c.average_rating DESC NULLS LAST
+            LIMIT :n
+        """),
+        {"n": n, "threshold": reader_config.FALLBACK_RATING_THRESHOLD}
+    )
+    
+    fallback_books = []
+    for row in fallback_result.fetchall():
+        fallback_books.append(BookRecommendation(
+            book_id=row.book_id,
+            title=row.title or "Unknown Title",
+            author=row.author or "Unknown Author",
+            reading_level=row.reading_level or 5.0,
+            librarian_blurb=row.librarian_blurb or "No description available",
+            justification="Popular book recommendation based on high ratings"
+        ))
+    
+    return fallback_books
+
 
 async def generate_reader_recommendations(
     user_hash_id: str,
@@ -757,15 +768,11 @@ async def generate_reader_recommendations(
         }
 
 async def _ask_agent(agent, prompt_messages, callbacks=None):
-    """Run the LangChain agent and return final AIMessage.
-
-    ``prompt_messages`` can be a string or a list of LangChain ``BaseMessage``
-    instances – whatever ``agent.ainvoke`` accepts via the ``messages`` field.
-    """
+    """Run the LangChain agent and return **only** the final AI message."""
     cfg = {"callbacks": callbacks} if callbacks else None
     response = await agent.ainvoke({"messages": prompt_messages}, config=cfg)
     final_msg = next(m for m in reversed(response["messages"]) if isinstance(m, AIMessage))
-    return final_msg, response 
+    return final_msg
 
 async def generate_agent_recommendations(
     mode: str,  # "student" or "reader"
@@ -822,24 +829,21 @@ async def generate_agent_recommendations(
                 # Ask agent
                 logger.debug("Calling LLM agent", extra={"request_id": request_id})
                 callbacks = [MetricCallbackHandler()]
-                agent_response = await _ask_agent(agent, prompt_messages, callbacks)
+                final_msg = await _ask_agent(agent, prompt_messages, callbacks)
 
-                # Parse agent response
+                # Parse agent response text
                 try:
-                    parsed_recs = parser.parse(agent_response)
-                    valid_recs = [r for r in parsed_recs if r.book_id != "ERROR"]
-                    
+                    parsed = parser.parse(final_msg.content)
+                    valid_recs = [BookRecommendation(**r.model_dump()) for r in parsed.recommendations]
+
                     if not valid_recs:
                         logger.warning("No valid recommendations parsed", extra={"request_id": request_id})
-                        # Return fallback recommendations
                         async with engine.begin() as conn:
-                            valid_recs = await _get_fallback_recommendations(n, conn)
-                        
-                except Exception as e:
+                            valid_recs = await _get_fallback_book_recommendations(n, conn)
+                except Exception:
                     logger.error("Failed to parse agent response", exc_info=True, extra={"request_id": request_id})
-                    # Return fallback recommendations
                     async with engine.begin() as conn:
-                        valid_recs = await _get_fallback_recommendations(n, conn)
+                        valid_recs = await _get_fallback_book_recommendations(n, conn)
 
                 # Mark as recommended (fire-and-forget) for student mode
                 if mode == "student":
@@ -886,7 +890,7 @@ async def generate_agent_recommendations(
         # Return fallback recommendations on error
         try:
             async with engine.begin() as conn:
-                fallback_recs = await _get_fallback_recommendations(n, conn)
+                fallback_recs = await _get_fallback_book_recommendations(n, conn)
                 return fallback_recs, {
                     "agent_duration": duration,
                     "tool_count": 0,
