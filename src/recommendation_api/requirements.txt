@@ -19,3 +19,4 @@ pydantic-settings>=2.1.0
 faiss-cpu
 redis>=5.0.0
 slowapi>=0.1.9
+prometheus-client>=0.22.0

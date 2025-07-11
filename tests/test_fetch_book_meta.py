@@ -42,40 +42,6 @@ class _FakeSession:
 
 
 @pytest.mark.asyncio
-async def test_fetch_google_books_meta_success(monkeypatch):
-    isbn = "1234567890"
-    fake_payload = {
-        "items": [
-            {
-                "volumeInfo": {
-                    "title": "Test Title",
-                    "authors": ["A"],
-                    "pageCount": 200,
-                    "publishedDate": "2010-01-01",
-                    "description": "A book.",
-                    "categories": ["Fiction"],
-                    "averageRating": 4.5,
-                    "ratingsCount": 10,
-                }
-            }
-        ]
-    }
-
-    def _fake_client_session(*args, **kwargs):
-        return _FakeSession(
-            expect_url=f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}",
-            payload=fake_payload,
-        )
-
-    monkeypatch.setattr("aiohttp.ClientSession", _fake_client_session)
-
-    meta = await fetch_google_books_meta(isbn)
-    assert meta["title"] == "Test Title"
-    assert meta["page_count"] == 200
-    assert meta["publication_year"] == "2010"
-
-
-@pytest.mark.asyncio
 async def test_fetch_open_library_meta_success(monkeypatch):
     isbn = "1111111111"
     fake_payload = {

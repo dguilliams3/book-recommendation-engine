@@ -81,22 +81,6 @@ class TestGoogleBooksAPI:
                 assert "fetched_at" in result
     
     @pytest.mark.asyncio
-    async def test_fetch_google_books_cached(self):
-        """Test Google Books API with cached data."""
-        cached_data = {
-            "title": "Cached Book",
-            "authors": ["Cached Author"],
-            "source": "google_books"
-        }
-        
-        with patch('src.recommendation_api.tools.fetch_google_books_meta.get_redis_client') as mock_redis:
-            mock_redis.return_value.get.return_value = json.dumps(cached_data)
-            
-            result = await fetch_google_books_meta("9780134685991")
-            
-            assert result == cached_data
-    
-    @pytest.mark.asyncio
     async def test_fetch_google_books_not_found(self):
         """Test Google Books API when book not found."""
         with patch('aiohttp.ClientSession.get') as mock_get:

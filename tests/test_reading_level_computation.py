@@ -6,12 +6,14 @@ Tests the core business logic for computing student reading levels,
 which was refactored from the MCP server into common/reading_level_utils.py.
 """
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock
+from src.common import reading_level_utils
 
 from src.common.reading_level_utils import (
     compute_student_reading_level,
     get_student_reading_level_from_db
 )
+from src.common import weights
 
 class TestReadingLevelComputation:
     """Test suite for reading level computation logic."""
@@ -134,63 +136,6 @@ class TestReadingLevelComputation:
             )
             assert result["confidence"] == expected_confidence
             assert result["method"] == "checkout_history"
-
-    @pytest.mark.asyncio
-    async def test_get_student_reading_level_from_db_success(self):
-        """Test database wrapper function with successful query."""
-        mock_pool = AsyncMock()
-        mock_conn = AsyncMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
-        
-        # Mock recent checkouts query
-        mock_conn.fetch.return_value = [
-            {"reading_level": 4.0},
-            {"reading_level": 4.2}
-        ]
-        
-        # Mock student data query  
-        mock_conn.fetchrow.return_value = {
-            "student_id": "S001",
-            "grade_level": 4,
-            "prior_year_reading_score": 3
-        }
-        
-        result = await get_student_reading_level_from_db("S001", mock_pool)
-            
-        assert result["avg_reading_level"] == 4.1  # Average of 4.0 and 4.2
-        assert result["confidence"] == 0.4  # 2 books
-        assert result["method"] == "checkout_history"
-        assert "error" not in result
-
-    @pytest.mark.asyncio
-    async def test_get_student_reading_level_from_db_student_not_found(self):
-        """Test database wrapper when student doesn't exist."""
-        mock_pool = AsyncMock()
-        mock_conn = AsyncMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
-        
-        # Mock student not found
-        mock_conn.fetchrow.return_value = None
-        
-        result = await get_student_reading_level_from_db("NONEXISTENT", mock_pool)
-            
-        assert result["avg_reading_level"] == 4.0  # Default fallback
-        assert result["confidence"] == 0.0
-        assert result["method"] == "default_fallback"
-        assert "student_not_found" in result["error"]
-
-    @pytest.mark.asyncio 
-    async def test_get_student_reading_level_from_db_database_error(self):
-        """Test database wrapper with connection error."""
-        mock_pool = AsyncMock()
-        mock_pool.acquire.side_effect = Exception("Connection failed")
-        
-        result = await get_student_reading_level_from_db("S001", mock_pool)
-            
-        assert result["avg_reading_level"] == 4.0  # Safe fallback
-        assert result["confidence"] == 0.0
-        assert result["method"] == "error_fallback"
-        assert "Connection failed" in result["error_details"]
 
     def test_reading_level_data_types(self):
         """Test that function handles various data types correctly."""

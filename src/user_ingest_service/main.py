@@ -13,6 +13,9 @@ import io
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from contextlib import asynccontextmanager
+import time
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import JSONResponse
@@ -250,6 +253,24 @@ async def upload_books_csv(
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "user_ingest_service"}
+
+@app.get("/metrics")
+async def metrics_endpoint():
+    """Prometheus metrics endpoint for scraping."""
+    from common.metrics import _PROM
+    if not _PROM:
+        return JSONResponse({"detail": "prometheus_client not installed"}, status_code=501)
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+@app.get("/live")
+async def live():
+    """Liveness probe."""
+    return {"status": "alive", "timestamp": time.time()}
+
+@app.get("/ready")
+async def ready():
+    """Readiness probe (delegates to health check)."""
+    return await health_check()
 
 if __name__ == "__main__":
     import uvicorn

@@ -825,9 +825,29 @@ def main():
 
             @st.cache_data(ttl=5, show_spinner=False)
             def _load_logs(lines: int):
-                with open(LOG_PATH, "r", encoding="utf-8") as f:
-                    data = f.readlines()[-lines:]
-                records = [json.loads(l) for l in data]
+                try:
+                    with open(LOG_PATH, "r", encoding="utf-8") as f:
+                        data = f.readlines()[-lines:]
+                except FileNotFoundError:
+                    st.info("No log file found yet. Ensure log_consumer is running and logs are being published to Kafka.")
+                    return pd.DataFrame()
+                except UnicodeDecodeError:
+                    st.error("Log file is not valid UTF-8. It may be corrupted or written by another process.")
+                    return pd.DataFrame()
+                except Exception as e:
+                    st.error(f"Error reading log file: {e}")
+                    return pd.DataFrame()
+
+                records = []
+                for l in data:
+                    try:
+                        records.append(json.loads(l))
+                    except json.JSONDecodeError:
+                        # Skip lines that aren't valid JSON
+                        continue
+                if not records:
+                    st.info("Log file is present but contains no valid JSON log entries.")
+                    return pd.DataFrame()
                 return pd.json_normalize(records)
 
             df = _load_logs(max_lines)

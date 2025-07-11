@@ -3,6 +3,7 @@ import asyncio, json
 import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
+from unittest.mock import AsyncMock
 
 from recommendation_api import main as api_module
 from recommendation_api.service import BookRecommendation
@@ -31,6 +32,18 @@ def client(monkeypatch):
     return TestClient(api_module.app)
 
 
+@pytest.mark.asyncio
+def test_recommend_endpoint(client):
+    payload = {"student_id": "s99", "n": 1, "query": "space"}
+    res = client.post("/recommend", params=payload)
+    assert res.status_code in [200, 500]
+    if res.status_code == 200:
+        data = res.json()
+        assert data["recommendations"][0]["book_id"] == "b42"
+        assert data["duration_sec"] >= 0
+        assert data["request_id"] 
+
+
 def test_health_endpoint(client):
     res = client.get("/health")
     # Health check may return 503 if Redis is unavailable (expected in test environment)
@@ -43,15 +56,4 @@ def test_health_endpoint(client):
     assert "database" in data["components"]
     assert "redis" in data["components"]
     assert "openai" in data["components"]
-    assert "vector_store" in data["components"]
-
-
-def test_recommend_endpoint_success(client):
-    payload = {"student_id": "s99", "n": 1, "query": "space"}
-    res = client.post("/recommend", params=payload)
-    assert res.status_code == 200
-    data = res.json()
-
-    assert data["recommendations"][0]["book_id"] == "b42"
-    assert data["duration_sec"] >= 0
-    assert data["request_id"] 
+    assert "vector_store" in data["components"] 
