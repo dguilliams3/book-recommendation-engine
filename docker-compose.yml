@@ -122,6 +122,38 @@ services:
       redis:
         condition: service_healthy
 
+  # Production-ready LLM microservice with Redis caching, Kafka logging, and LangChain integration
+  llm_microservice:
+    build:
+      context: .
+      dockerfile: src/llm_microservice/Dockerfile
+    platform: linux/amd64
+    container_name: llm_microservice
+    env_file:
+      - .env
+    ports:
+      - "8001:8000"
+    environment:
+      - OPENAI_API_KEY
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4}
+      - REDIS_URL=redis://redis:6379
+      - KAFKA_BROKERS=kafka:9092
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - CACHE_TTL=${CACHE_TTL:-3600}
+      - MAX_RETRIES=${MAX_RETRIES:-3}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-30}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
 
 # Streamlit dashboard that teachers and students use to search the catalog and receive recommendations.
   streamlit_ui:
