@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 class LLMServiceError(Exception):
     """Base exception for LLM service errors."""
-    
+
     def __init__(
         self,
         message: str,
@@ -37,7 +37,7 @@ class LLMServiceError(Exception):
 
 class ValidationError(LLMServiceError):
     """Exception for validation errors."""
-    
+
     def __init__(
         self,
         message: str,
@@ -56,7 +56,7 @@ class ValidationError(LLMServiceError):
 
 class AuthenticationError(LLMServiceError):
     """Exception for authentication errors."""
-    
+
     def __init__(
         self,
         message: str = "Authentication failed",
@@ -73,7 +73,7 @@ class AuthenticationError(LLMServiceError):
 
 class DuplicateRequestError(LLMServiceError):
     """Exception for duplicate request ID errors."""
-    
+
     def __init__(
         self,
         message: str = "Duplicate request ID",
@@ -91,7 +91,7 @@ class DuplicateRequestError(LLMServiceError):
 
 class RateLimitError(LLMServiceError):
     """Exception for rate limit errors."""
-    
+
     def __init__(
         self,
         message: str = "Rate limit exceeded",
@@ -101,7 +101,7 @@ class RateLimitError(LLMServiceError):
         error_details = details or {}
         if retry_after:
             error_details["retry_after"] = retry_after
-        
+
         super().__init__(
             message=message,
             error_type="rate_limit_error",
@@ -113,7 +113,7 @@ class RateLimitError(LLMServiceError):
 
 class OpenAIError(LLMServiceError):
     """Exception for OpenAI API errors."""
-    
+
     def __init__(
         self,
         message: str,
@@ -131,7 +131,7 @@ class OpenAIError(LLMServiceError):
 
 class NetworkError(LLMServiceError):
     """Exception for network-related errors."""
-    
+
     def __init__(
         self,
         message: str = "Network error occurred",
@@ -148,7 +148,7 @@ class NetworkError(LLMServiceError):
 
 class CacheError(LLMServiceError):
     """Exception for cache-related errors."""
-    
+
     def __init__(
         self,
         message: str = "Cache error occurred",
@@ -165,7 +165,7 @@ class CacheError(LLMServiceError):
 
 class LoggingError(LLMServiceError):
     """Exception for logging-related errors."""
-    
+
     def __init__(
         self,
         message: str = "Logging error occurred",
@@ -201,18 +201,18 @@ def create_error_response(
 ) -> ErrorResponse:
     """
     Create a structured error response from an exception.
-    
+
     Args:
         request_id: The request ID associated with the error
         error: The exception that occurred
         timestamp: Optional timestamp (defaults to current time)
-        
+
     Returns:
         ErrorResponse: Structured error response
     """
     if timestamp is None:
         timestamp = datetime.utcnow().isoformat() + "Z"
-    
+
     # Handle known service errors
     if isinstance(error, LLMServiceError):
         error_detail = ErrorDetail(
@@ -231,7 +231,7 @@ def create_error_response(
             message="An unexpected error occurred",
             details={"original_error": str(error)},
         )
-    
+
     return ErrorResponse(
         request_id=request_id,
         error=error_detail,
@@ -242,16 +242,16 @@ def create_error_response(
 def get_http_status_from_error(error: Exception) -> int:
     """
     Get HTTP status code from an exception.
-    
+
     Args:
         error: The exception to get status code for
-        
+
     Returns:
         int: HTTP status code
     """
     if isinstance(error, LLMServiceError):
         return error.http_status
-    
+
     # Default to 500 for unknown errors
     return 500
 
@@ -259,16 +259,16 @@ def get_http_status_from_error(error: Exception) -> int:
 def map_openai_error(error: Exception) -> OpenAIError:
     """
     Map OpenAI API errors to our error types.
-    
+
     Args:
         error: The OpenAI exception
-        
+
     Returns:
         OpenAIError: Mapped error
     """
     error_message = str(error)
     error_type = type(error).__name__
-    
+
     # Map common OpenAI errors
     if "rate limit" in error_message.lower():
         return OpenAIError(
@@ -277,7 +277,7 @@ def map_openai_error(error: Exception) -> OpenAIError:
             details={
                 "original_error": error_message,
                 "error_type": error_type,
-            }
+            },
         )
     elif "invalid api key" in error_message.lower():
         return OpenAIError(
@@ -286,7 +286,7 @@ def map_openai_error(error: Exception) -> OpenAIError:
             details={
                 "original_error": error_message,
                 "error_type": error_type,
-            }
+            },
         )
     elif "context length" in error_message.lower():
         return OpenAIError(
@@ -295,7 +295,7 @@ def map_openai_error(error: Exception) -> OpenAIError:
             details={
                 "original_error": error_message,
                 "error_type": error_type,
-            }
+            },
         )
     elif "timeout" in error_message.lower():
         return OpenAIError(
@@ -304,7 +304,7 @@ def map_openai_error(error: Exception) -> OpenAIError:
             details={
                 "original_error": error_message,
                 "error_type": error_type,
-            }
+            },
         )
     else:
         return OpenAIError(
@@ -313,7 +313,7 @@ def map_openai_error(error: Exception) -> OpenAIError:
             details={
                 "original_error": error_message,
                 "error_type": error_type,
-            }
+            },
         )
 
 
@@ -324,53 +324,55 @@ def log_error_context(
 ) -> None:
     """
     Log error with context information.
-    
+
     Args:
         error: The error that occurred
         request_id: The request ID
         context: Additional context information
     """
     context = context or {}
-    
+
     log_data = {
         "request_id": request_id,
         "error_type": type(error).__name__,
         "error_message": str(error),
         **context,
     }
-    
+
     if isinstance(error, LLMServiceError):
-        log_data.update({
-            "service_error_type": error.error_type,
-            "service_error_code": error.error_code,
-            "http_status": error.http_status,
-        })
-    
+        log_data.update(
+            {
+                "service_error_type": error.error_type,
+                "service_error_code": error.error_code,
+                "http_status": error.http_status,
+            }
+        )
+
     logger.error(f"Error occurred: {log_data}")
 
 
 def sanitize_error_for_logging(error_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Sanitize error data for logging by removing sensitive information.
-    
+
     Args:
         error_data: The error data to sanitize
-        
+
     Returns:
         Dict[str, Any]: Sanitized error data
     """
     sanitized = error_data.copy()
-    
+
     # Remove sensitive fields
     sensitive_fields = [
-        'openai_api_key',
-        'api_key',
-        'password',
-        'secret',
-        'token',
-        'authorization',
+        "openai_api_key",
+        "api_key",
+        "password",
+        "secret",
+        "token",
+        "authorization",
     ]
-    
+
     def remove_sensitive(obj, path=""):
         if isinstance(obj, dict):
             return {
@@ -379,8 +381,10 @@ def sanitize_error_for_logging(error_data: Dict[str, Any]) -> Dict[str, Any]:
                 if k.lower() not in sensitive_fields
             }
         elif isinstance(obj, list):
-            return [remove_sensitive(item, f"{path}[{i}]") for i, item in enumerate(obj)]
+            return [
+                remove_sensitive(item, f"{path}[{i}]") for i, item in enumerate(obj)
+            ]
         else:
             return obj
-    
-    return remove_sensitive(sanitized) 
+
+    return remove_sensitive(sanitized)

@@ -10,4 +10,4 @@ This microservice provides a containerized, reusable service for LLM interaction
 - Production-ready monitoring
 """
 
-__version__ = "1.0.0" 
+__version__ = "1.0.0"
