@@ -1,1 +1,1 @@
-"""Text-to-speech worker stub.""" 
+"""Text-to-speech worker stub."""

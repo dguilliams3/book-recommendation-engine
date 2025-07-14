@@ -37,4 +37,4 @@ def seed_random(seed: int | None = None) -> int:
 
     uuid.uuid4 = _uuid4  # type: ignore
 
-    return seed 
+    return seed

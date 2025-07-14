@@ -3,6 +3,7 @@
 Keeping this logic in its own module makes `main.py` a clean entry-point while
 allowing unit tests to import :func:`run_ingestion` directly.
 """
+
 from __future__ import annotations
 
 import asyncio, csv, json, sys, time, uuid
@@ -61,7 +62,9 @@ async def run_ingestion():
     store = None
     if (vec_dir / "index.faiss").exists():
         logger.info("Loading existing FAISS index")
-        store = FAISS.load_local(vec_dir, embeddings, allow_dangerous_deserialization=True)
+        store = FAISS.load_local(
+            vec_dir, embeddings, allow_dangerous_deserialization=True
+        )
         logger.info("FAISS index loaded", extra={"index_size": store.index.ntotal})
 
     # Database engine ---------------------------------------------------------
@@ -99,7 +102,10 @@ async def run_ingestion():
                     try:
                         rl = float(row["reading_level"])
                     except ValueError:
-                        logger.warning("Bad reading_level value; estimating", extra={"value": row["reading_level"]})
+                        logger.warning(
+                            "Bad reading_level value; estimating",
+                            extra={"value": row["reading_level"]},
+                        )
                 if rl is None:
                     # readability_formula_estimator removed – reading level now supplied via CSV
                     pass
@@ -142,7 +148,9 @@ async def run_ingestion():
                     },
                 )
 
-                doc_text, meta = flattener(row | {"reading_level": rl, "book_id": item.book_id})
+                doc_text, meta = flattener(
+                    row | {"reading_level": rl, "book_id": item.book_id}
+                )
                 book_texts.append(doc_text)
                 book_metadatas.append(meta)
                 book_count += 1
@@ -153,7 +161,10 @@ async def run_ingestion():
         # Emit event
         if book_count:
             await publish_event(
-                BOOK_EVENTS_TOPIC, BookAddedEvent(count=book_count, book_ids=[m["book_id"] for m in book_metadatas]).dict()
+                BOOK_EVENTS_TOPIC,
+                BookAddedEvent(
+                    count=book_count, book_ids=[m["book_id"] for m in book_metadatas]
+                ).dict(),
             )
 
         # Build or extend FAISS ------------------------------------------------
@@ -189,8 +200,14 @@ async def run_ingestion():
                 logger.debug(f"✓ Student {stu.student_id} inserted successfully")
             except Exception as e:
                 student_failures += 1
-                logger.error(f"Failed to process student row {row.get('student_id', 'unknown')}: {e}", exc_info=True)
-        logger.info("Students processed", extra={"count": student_count, "failures": student_failures})
+                logger.error(
+                    f"Failed to process student row {row.get('student_id', 'unknown')}: {e}",
+                    exc_info=True,
+                )
+        logger.info(
+            "Students processed",
+            extra={"count": student_count, "failures": student_failures},
+        )
 
         if student_count:
             await publish_event(
@@ -200,7 +217,10 @@ async def run_ingestion():
 
         # Commit books and students before processing checkouts so that FK constraints are satisfied even if checkouts fail
         await sess.commit()
-        logger.info("Books and students committed", extra={"books": book_count, "students": student_count})
+        logger.info(
+            "Books and students committed",
+            extra={"books": book_count, "students": student_count},
+        )
 
         # -------- checkouts --------------------------------------------------
         checkout_count = 0
@@ -225,7 +245,11 @@ async def run_ingestion():
 
                 await publish_event(
                     CHECKOUT_EVENTS_TOPIC,
-                    CheckoutAddedEvent(student_id=chk.student_id, book_id=chk.book_id, checkout_date=str(chk.checkout_date)).dict(),
+                    CheckoutAddedEvent(
+                        student_id=chk.student_id,
+                        book_id=chk.book_id,
+                        checkout_date=str(chk.checkout_date),
+                    ).dict(),
                 )
             except Exception:
                 logger.error("Failed checkout row", exc_info=True)
@@ -254,4 +278,4 @@ async def run_ingestion():
     )
 
     # Producer cleanup now handled automatically per event loop
-    logger.info("Ingestion finished", extra={"duration_sec": duration}) 
+    logger.info("Ingestion finished", extra={"duration_sec": duration})

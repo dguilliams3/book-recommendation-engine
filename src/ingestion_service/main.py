@@ -20,14 +20,21 @@ from common.settings import settings as S
 from common import models
 from common.structured_logging import get_logger
 from common.kafka_utils import publish_event
-from common.events import (BookAddedEvent, BOOK_EVENTS_TOPIC, StudentAddedEvent,
-                            StudentUpdatedEvent, CheckoutAddedEvent, STUDENT_EVENTS_TOPIC,
-                            CHECKOUT_EVENTS_TOPIC)
+from common.events import (
+    BookAddedEvent,
+    BOOK_EVENTS_TOPIC,
+    StudentAddedEvent,
+    StudentUpdatedEvent,
+    CheckoutAddedEvent,
+    STUDENT_EVENTS_TOPIC,
+    CHECKOUT_EVENTS_TOPIC,
+)
 from .pipeline import run_ingestion
 from common.metrics import JOB_RUNS_TOTAL, JOB_DURATION_SECONDS
 
 logger = get_logger(__name__)
 TOPIC = "ingestion_metrics"
+
 
 async def _send(payload):
     """Send metrics payload to Kafka."""
@@ -36,6 +43,7 @@ async def _send(payload):
         logger.debug("Metric sent successfully", extra={"payload": payload})
     except Exception:
         logger.error("Metric send failed", exc_info=True, extra={"payload": payload})
+
 
 def ingest():
     """Run the ingestion pipeline and emit Prometheus job metrics."""
@@ -58,9 +66,10 @@ def ingest():
         )
         raise
 
+
 if __name__ == "__main__":
     try:
         ingest()
         logger.info("Ingestion completed successfully")
     except Exception:
-        logger.exception("Ingestion service failed") 
+        logger.exception("Ingestion service failed")

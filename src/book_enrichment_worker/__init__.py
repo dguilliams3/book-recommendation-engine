@@ -1,1 +1,1 @@
-"""Book enrichment service for metadata augmentation.""" 
+"""Book enrichment service for metadata augmentation."""

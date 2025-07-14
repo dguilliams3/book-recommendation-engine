@@ -1,7 +1,20 @@
 from typing import List, Optional
 from datetime import date
 from pydantic import BaseModel, Field, conint, field_validator, ConfigDict
-from sqlalchemy import Column, String, Integer, Float, Date, Text, JSON, TIMESTAMP, UUID, SmallInteger, ForeignKey, Index
+from sqlalchemy import (
+    Column,
+    String,
+    Integer,
+    Float,
+    Date,
+    Text,
+    JSON,
+    TIMESTAMP,
+    UUID,
+    SmallInteger,
+    ForeignKey,
+    Index,
+)
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import JSONB
@@ -14,10 +27,12 @@ Base = declarative_base()
 # EXISTING SCHEMA MODELS (from 00_init_schema.sql)
 # ====================================================================
 
+
 class Student(Base):
     """Core student demographics and academic data"""
+
     __tablename__ = "students"
-    
+
     student_id = Column(String, primary_key=True)
     grade_level = Column(Integer)
     age = Column(Integer)
@@ -25,10 +40,12 @@ class Student(Base):
     prior_year_reading_score = Column(Integer)
     lunch_period = Column(String)
 
+
 class Catalog(Base):
     """Book catalog with metadata and reading difficulty metrics"""
+
     __tablename__ = "catalog"
-    
+
     book_id = Column(String, primary_key=True)
     isbn = Column(String)
     title = Column(String)
@@ -42,77 +59,94 @@ class Catalog(Base):
     reading_level = Column(Float)  # NUMERIC(4,2)
     average_rating = Column(Float)  # NUMERIC(3,2)
 
+
 class Checkout(Base):
     """Student book checkout/return history with ratings"""
+
     __tablename__ = "checkout"
-    
-    student_id = Column(String, ForeignKey('students.student_id'), primary_key=True)
-    book_id = Column(String, ForeignKey('catalog.book_id'), primary_key=True)
+
+    student_id = Column(String, ForeignKey("students.student_id"), primary_key=True)
+    book_id = Column(String, ForeignKey("catalog.book_id"), primary_key=True)
     checkout_date = Column(Date, primary_key=True)
     return_date = Column(Date)
     student_rating = Column(Integer)
     checkout_id = Column(String)
 
+
 class StudentEmbedding(Base):
     """ML embeddings for student preference modeling"""
+
     __tablename__ = "student_embeddings"
-    
-    student_id = Column(String, ForeignKey('students.student_id'), primary_key=True)
+
+    student_id = Column(String, ForeignKey("students.student_id"), primary_key=True)
     vec = Column(Text)  # VECTOR(1536) - will be handled by raw SQL
     last_event = Column(UUID(as_uuid=True))
+
 
 class BookEmbedding(Base):
     """ML embeddings for semantic book similarity"""
+
     __tablename__ = "book_embeddings"
-    
-    book_id = Column(String, ForeignKey('catalog.book_id'), primary_key=True)
+
+    book_id = Column(String, ForeignKey("catalog.book_id"), primary_key=True)
     vec = Column(Text)  # VECTOR(1536) - will be handled by raw SQL
     last_event = Column(UUID(as_uuid=True))
 
+
 class StudentSimilarity(Base):
     """Precomputed student similarity matrix for collaborative filtering"""
+
     __tablename__ = "student_similarity"
-    
-    a = Column(String, ForeignKey('students.student_id'), primary_key=True)
-    b = Column(String, ForeignKey('students.student_id'), primary_key=True)
+
+    a = Column(String, ForeignKey("students.student_id"), primary_key=True)
+    b = Column(String, ForeignKey("students.student_id"), primary_key=True)
     sim = Column(Float)
     last_event = Column(UUID(as_uuid=True))
 
+
 class StudentProfileCache(Base):
     """Cached student reading profiles for performance"""
+
     __tablename__ = "student_profile_cache"
-    
-    student_id = Column(String, ForeignKey('students.student_id'), primary_key=True)
+
+    student_id = Column(String, ForeignKey("students.student_id"), primary_key=True)
     histogram = Column(JSONB)
     last_event = Column(UUID(as_uuid=True))
 
+
 class RecommendationHistory(Base):
     """Recommendation history for deduplication and tracking"""
+
     __tablename__ = "recommendation_history"
-    
-    student_id = Column(String, ForeignKey('students.student_id'), primary_key=True)
-    book_id = Column(String, ForeignKey('catalog.book_id'), primary_key=True)
+
+    student_id = Column(String, ForeignKey("students.student_id"), primary_key=True)
+    book_id = Column(String, ForeignKey("catalog.book_id"), primary_key=True)
     recommended_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     justification = Column(Text)
+
 
 # ====================================================================
 # READER MODE MODELS (NEW)
 # ====================================================================
 
+
 class PublicUser(Base):
     """Reader Mode users - anonymous public users who upload book lists"""
+
     __tablename__ = "public_users"
-    
+
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     hash_id = Column(String, unique=True, nullable=False)  # SHA256 hash of identifier
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
+
 class UploadedBook(Base):
     """Books uploaded by Reader Mode users"""
+
     __tablename__ = "uploaded_books"
-    
+
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey('public_users.id'), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("public_users.id"), nullable=False)
     title = Column(Text)
     author = Column(Text)
     rating = Column(SmallInteger)  # 1-5 user rating
@@ -120,32 +154,35 @@ class UploadedBook(Base):
     raw_payload = Column(JSON)  # Original upload data
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
+
 class Feedback(Base):
     """Reader Mode feedback on recommendations"""
+
     __tablename__ = "feedback"
-    
+
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey('public_users.id'), nullable=False)
-    book_id = Column(String, ForeignKey('catalog.book_id'), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("public_users.id"), nullable=False)
+    book_id = Column(String, ForeignKey("catalog.book_id"), nullable=False)
     score = Column(SmallInteger, nullable=False)  # +1 (thumbs up) or -1 (thumbs down)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
 
 # ====================================================================
 # INDEXES (defined declaratively)
 # ====================================================================
 
 # Performance indexes
-Index('idx_checkout_student_id', Checkout.student_id)
-Index('idx_checkout_book_id', Checkout.book_id)
-Index('idx_checkout_checkout_id', Checkout.checkout_id)
-Index('idx_catalog_reading_level', Catalog.reading_level)
-Index('idx_catalog_genre', Catalog.genre)
-Index('idx_catalog_rating', Catalog.average_rating)
-Index('idx_students_grade', Student.grade_level)
-Index('idx_students_teacher', Student.homeroom_teacher)
-Index('idx_similarity_score', StudentSimilarity.sim.desc())
+Index("idx_checkout_student_id", Checkout.student_id)
+Index("idx_checkout_book_id", Checkout.book_id)
+Index("idx_checkout_checkout_id", Checkout.checkout_id)
+Index("idx_catalog_reading_level", Catalog.reading_level)
+Index("idx_catalog_genre", Catalog.genre)
+Index("idx_catalog_rating", Catalog.average_rating)
+Index("idx_students_grade", Student.grade_level)
+Index("idx_students_teacher", Student.homeroom_teacher)
+Index("idx_similarity_score", StudentSimilarity.sim.desc())
 
-# Vector indexes will be created manually as they require special syntax 
+# Vector indexes will be created manually as they require special syntax
 
 # --------------------------------------------------------------------
 # DATA INGESTION / VALIDATION MODELS (Pydantic)
@@ -157,6 +194,7 @@ Index('idx_similarity_score', StudentSimilarity.sim.desc())
 # call-sites. They intentionally avoid any ORMs or heavy dependencies.
 
 import json as _json  # stdlib – keep alias to avoid clashing with sqlalchemy.JSON
+
 
 class _RecordModel(BaseModel):
     """Shared config for record models."""
@@ -270,4 +308,4 @@ class CheckoutRecord(_RecordModel):
     @field_validator("checkout_id", mode="after")
     @classmethod
     def _default_checkout_id(cls, v):
-        return v or str(uuid.uuid4()) 
+        return v or str(uuid.uuid4())

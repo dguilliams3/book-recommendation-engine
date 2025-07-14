@@ -3,6 +3,7 @@ from typing import Any, Dict, Tuple
 from common.reading_level_utils import numeric_to_grade_text
 from .base import Flattener
 
+
 class BookFlattener(Flattener):
     """Flatten a catalog row into embedding text and metadata."""
 
@@ -18,7 +19,12 @@ class BookFlattener(Flattener):
         level = row.get("reading_level")
         grade_label = numeric_to_grade_text(level)
 
-        text_parts = [row.get("title", ""), row.get("description", ""), *genres, *keywords]
+        text_parts = [
+            row.get("title", ""),
+            row.get("description", ""),
+            *genres,
+            *keywords,
+        ]
         # Include author name to improve semantic clustering
         author = row.get("author")
         if author:
@@ -35,4 +41,4 @@ class BookFlattener(Flattener):
             "keywords": keywords,
             "author": author,
         }
-        return text, meta 
+        return text, meta

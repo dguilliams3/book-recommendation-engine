@@ -1,1 +1,1 @@
-"""CSV ingestion into Postgres + FAISS.""" 
+"""CSV ingestion into Postgres + FAISS."""
