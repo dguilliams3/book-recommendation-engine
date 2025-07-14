@@ -2,6 +2,14 @@
 import pytest
 import asyncio
 from unittest.mock import patch
+import os
+
+pytestmark = pytest.mark.integration
+
+skip_integration = pytest.mark.skipif(
+    os.name == 'nt' and not os.environ.get('RUN_INTEGRATION'),
+    reason="Integration tests require Docker and are skipped on Windows unless RUN_INTEGRATION=1"
+)
 
 from common.weights import get as get_weights
 
@@ -122,6 +130,7 @@ def test_phase2_weights_consistency():
         assert common_weights[key] == api_weights[key], f"Mismatch for {key}: common={common_weights[key]}, api={api_weights[key]}"
 
 
+@skip_integration
 @pytest.mark.asyncio
 async def test_phase2_faiss_integration_graceful_failure():
     """Test that FAISS integration fails gracefully when unavailable."""

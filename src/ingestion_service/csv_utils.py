@@ -5,6 +5,7 @@ from common.structured_logging import get_logger
 
 logger = get_logger(__name__)
 
+
 def _load_csv(path: Path) -> Iterable[dict]:
     logger.debug("Loading CSV file", extra={"file_path": str(path)})
     try:
@@ -20,10 +21,10 @@ def _load_csv(path: Path) -> Iterable[dict]:
                     if k is None or (isinstance(k, str) and k.strip() == ""):
                         extra_cells = v if isinstance(v, list) else [v]
                         logger.error(
-                            "Malformed CSV row: extra cells detected", 
+                            "Malformed CSV row: extra cells detected",
                             extra={
-                                "file_path": str(path), 
-                                "line_num": reader.line_num, 
+                                "file_path": str(path),
+                                "line_num": reader.line_num,
                                 "extra_cells": extra_cells,
                             },
                         )
@@ -42,7 +43,14 @@ def _load_csv(path: Path) -> Iterable[dict]:
                     else:
                         cleaned_row[k] = str(v).strip()
                 yield cleaned_row
-            logger.info("CSV file loaded successfully", extra={"file_path": str(path), "row_count": row_count})
+            logger.info(
+                "CSV file loaded successfully",
+                extra={"file_path": str(path), "row_count": row_count},
+            )
     except Exception as e:
-        logger.error(f"Failed to load CSV file: {e}", exc_info=True, extra={"file_path": str(path)})
-        raise 
+        logger.error(
+            f"Failed to load CSV file: {e}",
+            exc_info=True,
+            extra={"file_path": str(path)},
+        )
+        raise

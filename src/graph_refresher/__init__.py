@@ -1,1 +1,1 @@
-"""Nightly graph refresh service for student similarity analysis.""" 
+"""Nightly graph refresh service for student similarity analysis."""

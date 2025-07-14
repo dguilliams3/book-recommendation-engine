@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """Common Prometheus metrics helpers.
 
 This module exposes reusable counters/histograms **and** degrades gracefully
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 # ---------------------------------------------------------------------------
 try:
     from prometheus_client import Counter, Histogram  # type: ignore
+
     _PROM = True
 except ImportError:  # pragma: no cover – fallback when prometheus_client absent
 
@@ -82,4 +84,4 @@ __all__ = [
     "REQUEST_LATENCY",
     "JOB_RUNS_TOTAL",
     "JOB_DURATION_SECONDS",
-] 
+]

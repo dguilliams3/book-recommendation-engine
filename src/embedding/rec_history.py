@@ -2,6 +2,7 @@ from typing import Any, Dict, Tuple
 
 from .base import Flattener
 
+
 class RecommendationFlattener(Flattener):
     """Flatten historical recommendation row."""
 
@@ -11,4 +12,4 @@ class RecommendationFlattener(Flattener):
             f"to student {row.get('student_id')}"
         )
         meta = {"student_id": row.get("student_id"), "book_id": row.get("book_id")}
-        return text, meta 
+        return text, meta

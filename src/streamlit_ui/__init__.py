@@ -1,1 +1,1 @@
-"""Thin Streamlit UI.""" 
+"""Thin Streamlit UI."""
