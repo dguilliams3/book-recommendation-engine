@@ -8,6 +8,7 @@ Nightly job (<60 s CPU) that:
 
 Now also listens for book added events to trigger refresh.
 """
+
 import asyncio, json, math, time, uuid, sys, gc
 from datetime import date, timedelta
 from collections import defaultdict
@@ -35,17 +36,21 @@ EMB = OpenAIEmbeddings(
 
 # Debouncing for event-triggered refreshes
 _refresh_task: Optional[asyncio.Task] = None
-_refresh_delay = S.graph_refresh_delay_seconds  # seconds to wait after last event before refreshing
+_refresh_delay = (
+    S.graph_refresh_delay_seconds
+)  # seconds to wait after last event before refreshing
+
 
 async def debounced_refresh():
     """Debounced refresh that waits for events to settle before running."""
     global _refresh_task
-    
+
     if _refresh_task and not _refresh_task.done():
         logger.info("Cancelling previous refresh task")
         _refresh_task.cancel()
-    
+
     _refresh_task = asyncio.create_task(_delayed_refresh())
+
 
 async def _delayed_refresh():
     """Wait for the delay period then run the refresh."""
@@ -59,16 +64,21 @@ async def _delayed_refresh():
     except Exception as e:
         logger.error("Event-triggered refresh failed", exc_info=True)
 
+
 async def handle_book_event(event_data: dict):
     """Handle book added events by triggering a debounced refresh."""
     try:
         logger.info("Received book added event", extra={"event": event_data})
         await debounced_refresh()
     except Exception as e:
-        logger.error("Error handling book event", exc_info=True, extra={"event": event_data})
+        logger.error(
+            "Error handling book event", exc_info=True, extra={"event": event_data}
+        )
+
 
 def half_life_weight(days: int) -> float:
     return 0.5 ** (days / S.half_life_days)
+
 
 @asynccontextmanager
 async def managed_vector_processing(batch_size: int = 100):
@@ -80,14 +90,18 @@ async def managed_vector_processing(batch_size: int = 100):
         gc.collect()
         logger.debug("Memory cleanup completed")
 
+
 async def fetch_events(conn):
     window_start = date.today() - timedelta(days=S.half_life_days * 4)
-    logger.info("Fetching checkout events", extra={
-        "window_start": str(window_start),
-        "half_life_days": S.half_life_days,
-        "window_days": S.half_life_days * 4
-    })
-    
+    logger.info(
+        "Fetching checkout events",
+        extra={
+            "window_start": str(window_start),
+            "half_life_days": S.half_life_days,
+            "window_days": S.half_life_days * 4,
+        },
+    )
+
     try:
         rows = await conn.fetch(
             """SELECT c.difficulty_band, co.student_id, co.checkout_date
@@ -101,6 +115,7 @@ async def fetch_events(conn):
     except Exception as e:
         logger.error("Failed to fetch checkout events", exc_info=True)
         raise
+
 
 async def _wait_for_data(timeout_sec: int = 60):
     """Poll the checkout table until we have at least one row or timeout."""
@@ -116,17 +131,21 @@ async def _wait_for_data(timeout_sec: int = 60):
             if cnt and cnt > 0:
                 logger.info("Checkout data detected", extra={"rows": cnt})
                 return True
-            logger.info("Waiting for checkout data…", extra={"elapsed_sec": round(time.perf_counter()-start,1)})
+            logger.info(
+                "Waiting for checkout data…",
+                extra={"elapsed_sec": round(time.perf_counter() - start, 1)},
+            )
         except Exception:
             logger.debug("Checkout poll failed, retrying", exc_info=True)
         await asyncio.sleep(5)
     logger.warning("Timeout waiting for checkout data – proceeding anyway")
     return False
 
+
 async def main():
     logger.info("Starting graph refresh process")
     t0 = time.perf_counter()
-    
+
     # Connect to database
     logger.info("Connecting to database")
     pg_url = str(S.db_url)
@@ -140,7 +159,7 @@ async def main():
     except Exception as e:
         logger.error("Failed to connect to database", exc_info=True)
         raise
-    
+
     # Wait until ingestion has populated checkout data
     await _wait_for_data()
 
@@ -152,7 +171,7 @@ async def main():
     tokens = defaultdict(list)
     today = date.today()
     student_count = 0
-    
+
     for r in rows:
         d_band = r["difficulty_band"]
         days = (today - r["checkout_date"]).days
@@ -162,11 +181,11 @@ async def main():
         if d_band is not None:
             _list.append((d_band, w))
         student_count = max(student_count, len(tokens))
-    
-    logger.info("Processed events", extra={
-        "total_events": len(rows),
-        "unique_students": student_count
-    })
+
+    logger.info(
+        "Processed events",
+        extra={"total_events": len(rows), "unique_students": student_count},
+    )
 
     # Build embedding docs
     logger.info("Building embedding documents")
@@ -177,7 +196,7 @@ async def main():
         doc = " ".join(t * max(1, round(w * 10)) for t, w in pairs)
         docs.append(doc or "no_history")
         keys.append(sid)
-    
+
     logger.info("Generated embedding documents", extra={"document_count": len(docs)})
 
     # Generate embeddings with memory management
@@ -187,29 +206,35 @@ async def main():
         try:
             # Process in batches to avoid memory pressure
             if len(docs) > batch_size:
-                logger.info("Processing embeddings in batches", extra={
-                    "total_docs": len(docs),
-                    "batch_size": batch_size
-                })
+                logger.info(
+                    "Processing embeddings in batches",
+                    extra={"total_docs": len(docs), "batch_size": batch_size},
+                )
                 vectors = []
                 for i in range(0, len(docs), batch_size):
-                    batch = docs[i:i + batch_size]
+                    batch = docs[i : i + batch_size]
                     batch_vectors = EMB.embed_documents(batch)
                     vectors.extend(batch_vectors)
                     # Explicit cleanup of batch data
                     del batch_vectors, batch
                     gc.collect()
-                    logger.debug("Batch processed", extra={
-                        "batch_num": i // batch_size + 1,
-                        "total_batches": (len(docs) + batch_size - 1) // batch_size
-                    })
+                    logger.debug(
+                        "Batch processed",
+                        extra={
+                            "batch_num": i // batch_size + 1,
+                            "total_batches": (len(docs) + batch_size - 1) // batch_size,
+                        },
+                    )
             else:
                 vectors = EMB.embed_documents(docs)
-            
-            logger.info("Embeddings generated successfully", extra={
-                "vector_count": len(vectors),
-                "vector_dimension": len(vectors[0]) if vectors else 0
-            })
+
+            logger.info(
+                "Embeddings generated successfully",
+                extra={
+                    "vector_count": len(vectors),
+                    "vector_dimension": len(vectors[0]) if vectors else 0,
+                },
+            )
         except Exception as e:
             logger.error("Failed to generate embeddings", exc_info=True)
             raise
@@ -230,33 +255,40 @@ async def main():
     logger.info("Setting up vector extension and table")
     try:
         await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        
+
         # Debug: Check vectors right before the condition
-        logger.info("Debug before vectors check", extra={
-            "vectors_type": type(vectors).__name__,
-            "vectors_truthy": bool(vectors),
-            "vectors_length": len(vectors) if vectors else "N/A"
-        })
-        
+        logger.info(
+            "Debug before vectors check",
+            extra={
+                "vectors_type": type(vectors).__name__,
+                "vectors_truthy": bool(vectors),
+                "vectors_length": len(vectors) if vectors else "N/A",
+            },
+        )
+
         if not vectors:
-            logger.warning("No embeddings generated, skipping vector operations but similarity table created")
+            logger.warning(
+                "No embeddings generated, skipping vector operations but similarity table created"
+            )
             await conn.close()
             logger.info("Database connection closed")
             return
-            
+
         dim = len(vectors[0])
         if dim <= 0:
             logger.warning("Invalid embedding dimension, skipping vector operations")
             await conn.close()
             logger.info("Database connection closed")
             return
-            
+
         # Drop table if exists with wrong dimension
         await conn.execute("DROP TABLE IF EXISTS student_embeddings")
         await conn.execute(
             f"CREATE TABLE student_embeddings( student_id TEXT PRIMARY KEY, vec VECTOR({dim}), last_event UUID )"
         )
-        logger.info("Vector extension and table setup completed", extra={"dimension": dim})
+        logger.info(
+            "Vector extension and table setup completed", extra={"dimension": dim}
+        )
     except Exception as e:
         logger.error("Failed to setup vector extension/table", exc_info=True)
         raise
@@ -274,8 +306,11 @@ async def main():
             "ON CONFLICT(student_id) DO UPDATE SET vec = EXCLUDED.vec",
             rows_to_insert,
         )
-        logger.info("Student embeddings inserted successfully", extra={"embedding_count": len(keys)})
-        
+        logger.info(
+            "Student embeddings inserted successfully",
+            extra={"embedding_count": len(keys)},
+        )
+
         # Clean up large vectors from memory
         del vectors, rows_to_insert
         gc.collect()
@@ -297,10 +332,10 @@ async def main():
 
     # Compute neighbours with pgvector operator
     logger.info("Computing student similarities")
-    
+
     insert_rows = []
     similarity_count = 0
-    
+
     for i, sid in enumerate(keys):
         try:
             sims = await conn.fetch(
@@ -311,7 +346,7 @@ async def main():
                  ORDER BY student_embeddings.vec <=> src.vec LIMIT 15""",
                 sid,
             )
-            
+
             valid_sims = [
                 (sid, row["student_id"], row["sim"])
                 for row in sims
@@ -319,34 +354,47 @@ async def main():
             ]
             insert_rows.extend(valid_sims)
             similarity_count += len(valid_sims)
-            
+
             if (i + 1) % 50 == 0:
-                logger.debug("Similarity computation progress", extra={
-                    "processed": i + 1,
-                    "total": len(keys),
-                    "similarities_found": similarity_count
-                })
-                
+                logger.debug(
+                    "Similarity computation progress",
+                    extra={
+                        "processed": i + 1,
+                        "total": len(keys),
+                        "similarities_found": similarity_count,
+                    },
+                )
+
         except Exception as e:
-            logger.error("Failed to compute similarities for student", exc_info=True, extra={"student_id": sid})
+            logger.error(
+                "Failed to compute similarities for student",
+                exc_info=True,
+                extra={"student_id": sid},
+            )
             continue
-    
-    logger.info("Similarity computation completed", extra={
-        "total_similarities": similarity_count,
-        "similarity_threshold": S.similarity_threshold
-    })
-    
+
+    logger.info(
+        "Similarity computation completed",
+        extra={
+            "total_similarities": similarity_count,
+            "similarity_threshold": S.similarity_threshold,
+        },
+    )
+
     # Insert similarities
     logger.info("Inserting student similarities")
     try:
         await conn.executemany(
             "INSERT INTO student_similarity VALUES($1,$2,$3)", insert_rows
         )
-        logger.info("Student similarities inserted successfully", extra={"similarity_count": len(insert_rows)})
+        logger.info(
+            "Student similarities inserted successfully",
+            extra={"similarity_count": len(insert_rows)},
+        )
     except Exception as e:
         logger.error("Failed to insert similarities", exc_info=True)
         raise
-    
+
     await conn.close()
     logger.info("Database connection closed")
 
@@ -363,14 +411,18 @@ async def main():
         logger.info("Graph delta metrics published successfully", extra=metric_payload)
     except Exception:
         logger.error("Failed to publish graph delta metrics", exc_info=True)
-    
+
     duration = time.perf_counter() - t0
-    logger.info("Graph refresh process completed", extra={
-        "duration_sec": round(duration, 2),
-        "edges": len(insert_rows),
-        "students_processed": len(keys),
-        "similarities_found": similarity_count
-    })
+    logger.info(
+        "Graph refresh process completed",
+        extra={
+            "duration_sec": round(duration, 2),
+            "edges": len(insert_rows),
+            "students_processed": len(keys),
+            "similarities_found": similarity_count,
+        },
+    )
+
 
 if __name__ == "__main__":
     logger.info("Starting graph refresher service")
@@ -380,17 +432,17 @@ if __name__ == "__main__":
             # Start event listener
             consumer = KafkaEventConsumer(BOOK_EVENTS_TOPIC, "graph_refresher")
             listener_task = asyncio.create_task(consumer.start(handle_book_event))
-            
+
             # Wait until ingestion has populated checkout data
             await _wait_for_data()
-            
+
             # Run initial refresh
             try:
                 await main()
                 logger.info("Initial graph refresh completed")
             except Exception as e:
                 logger.error("Initial graph refresh failed", exc_info=True)
-            
+
             # Keep the event listener running
             logger.info("Graph refresher service running - listening for events")
             try:
@@ -398,11 +450,11 @@ if __name__ == "__main__":
             except KeyboardInterrupt:
                 logger.info("Graph refresher interrupted by user")
                 await consumer.stop()
-        
+
         asyncio.run(run_service())
         logger.info("Graph refresher service completed successfully")
     except KeyboardInterrupt:
         logger.info("Graph refresher interrupted by user")
     except Exception as e:
         logger.error("Graph refresher failed", exc_info=True)
-        raise 
+        raise

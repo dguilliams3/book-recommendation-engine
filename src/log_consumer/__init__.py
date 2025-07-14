@@ -1,1 +1,1 @@
-"""Kafka log consumer for service_logs topic.""" 
+"""Kafka log consumer for service_logs topic."""

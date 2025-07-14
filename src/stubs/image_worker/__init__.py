@@ -1,1 +1,1 @@
-"""Image processing worker stub.""" 
+"""Image processing worker stub."""

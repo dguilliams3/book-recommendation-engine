@@ -1,5 +1,6 @@
 from typing import Dict
 
+
 def readability_formula_estimator(_text: str) -> Dict:
     """Deprecated stub – feature removed.
 
@@ -8,4 +9,4 @@ def readability_formula_estimator(_text: str) -> Dict:
     working while always returning an empty dict.
     """
 
-    return {} 
+    return {}

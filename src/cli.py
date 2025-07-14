@@ -11,6 +11,7 @@ from .book_enrichment_worker.main import main as _enrich_job
 
 app = typer.Typer(help="Book-Recommendation-Engine control-plane CLI")
 
+
 # ---------------------------------------------------------------------
 # ingest
 # ---------------------------------------------------------------------
@@ -28,6 +29,7 @@ def ingest(
     asyncio.run(_ingest_job())
     typer.echo("✅  Ingestion job finished")
 
+
 # ---------------------------------------------------------------------
 # enrich
 # ---------------------------------------------------------------------
@@ -37,6 +39,7 @@ def enrich():
     typer.echo("🔎  Book-enrichment job started…")
     asyncio.run(_enrich_job())
     typer.echo("✅  Book-enrichment job finished")
+
 
 # ---------------------------------------------------------------------
 # graph
@@ -50,4 +53,4 @@ def graph():
 
 
 if __name__ == "__main__":
-    app() 
+    app()

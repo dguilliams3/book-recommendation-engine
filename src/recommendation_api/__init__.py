@@ -1,1 +1,1 @@
-"""FastAPI service providing /recommend, /health, /metrics.""" 
+"""FastAPI service providing /recommend, /health, /metrics."""
