@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 class RetryError(Exception):
     """Raised when all retry attempts are exhausted."""
+
     pass
 
 
@@ -32,7 +33,7 @@ def retry_with_exponential_backoff(
 ) -> Callable:
     """
     Decorator for retrying functions with exponential backoff.
-    
+
     Args:
         max_retries: Maximum number of retry attempts
         base_delay: Base delay in seconds for first retry
@@ -42,15 +43,16 @@ def retry_with_exponential_backoff(
         backoff_factor: Factor for jitter calculation
         retry_exceptions: Tuple of exceptions to retry on
         stop_exceptions: Tuple of exceptions to stop retrying on
-    
+
     Returns:
         Decorated function with retry logic
     """
+
     def decorator(func: Callable) -> Callable:
         @wraps(func)
         def sync_wrapper(*args, **kwargs) -> Any:
             last_exception = None
-            
+
             for attempt in range(max_retries + 1):
                 try:
                     return func(*args, **kwargs)
@@ -59,32 +61,34 @@ def retry_with_exponential_backoff(
                     raise
                 except retry_exceptions as e:
                     last_exception = e
-                    
+
                     if attempt == max_retries:
-                        logger.error(f"Max retries ({max_retries}) exceeded for {func.__name__}")
+                        logger.error(
+                            f"Max retries ({max_retries}) exceeded for {func.__name__}"
+                        )
                         raise RetryError(f"Max retries exceeded: {e}") from e
-                    
+
                     # Calculate delay with exponential backoff
-                    delay = min(base_delay * (exponential_base ** attempt), max_delay)
-                    
+                    delay = min(base_delay * (exponential_base**attempt), max_delay)
+
                     # Add jitter to prevent thundering herd
                     if jitter:
                         jitter_range = delay * backoff_factor
                         delay += random.uniform(-jitter_range, jitter_range)
-                    
+
                     logger.warning(
                         f"Attempt {attempt + 1}/{max_retries + 1} failed for {func.__name__}: {e}. "
                         f"Retrying in {delay:.2f}s"
                     )
                     time.sleep(delay)
-            
+
             # This should never be reached, but just in case
             raise RetryError(f"Unexpected retry failure") from last_exception
-        
+
         @wraps(func)
         async def async_wrapper(*args, **kwargs) -> Any:
             last_exception = None
-            
+
             for attempt in range(max_retries + 1):
                 try:
                     return await func(*args, **kwargs)
@@ -93,34 +97,36 @@ def retry_with_exponential_backoff(
                     raise
                 except retry_exceptions as e:
                     last_exception = e
-                    
+
                     if attempt == max_retries:
-                        logger.error(f"Max retries ({max_retries}) exceeded for {func.__name__}")
+                        logger.error(
+                            f"Max retries ({max_retries}) exceeded for {func.__name__}"
+                        )
                         raise RetryError(f"Max retries exceeded: {e}") from e
-                    
+
                     # Calculate delay with exponential backoff
-                    delay = min(base_delay * (exponential_base ** attempt), max_delay)
-                    
+                    delay = min(base_delay * (exponential_base**attempt), max_delay)
+
                     # Add jitter to prevent thundering herd
                     if jitter:
                         jitter_range = delay * backoff_factor
                         delay += random.uniform(-jitter_range, jitter_range)
-                    
+
                     logger.warning(
                         f"Attempt {attempt + 1}/{max_retries + 1} failed for {func.__name__}: {e}. "
                         f"Retrying in {delay:.2f}s"
                     )
                     await asyncio.sleep(delay)
-            
+
             # This should never be reached, but just in case
             raise RetryError(f"Unexpected retry failure") from last_exception
-        
+
         # Return appropriate wrapper based on whether function is async
         if asyncio.iscoroutinefunction(func):
             return async_wrapper
         else:
             return sync_wrapper
-    
+
     return decorator
 
 
@@ -134,7 +140,7 @@ def calculate_retry_delay(
 ) -> float:
     """
     Calculate retry delay with exponential backoff and jitter.
-    
+
     Args:
         attempt: Current attempt number (0-based)
         base_delay: Base delay in seconds
@@ -142,22 +148,22 @@ def calculate_retry_delay(
         exponential_base: Base for exponential calculation
         jitter: Whether to add jitter
         backoff_factor: Factor for jitter calculation
-    
+
     Returns:
         Calculated delay in seconds
     """
-    delay = min(base_delay * (exponential_base ** attempt), max_delay)
-    
+    delay = min(base_delay * (exponential_base**attempt), max_delay)
+
     if jitter:
         jitter_range = delay * backoff_factor
         delay += random.uniform(-jitter_range, jitter_range)
-    
+
     return max(0, delay)
 
 
 class RetryConfig:
     """Configuration for retry behavior."""
-    
+
     def __init__(
         self,
         max_retries: int = 3,
@@ -173,7 +179,7 @@ class RetryConfig:
         self.exponential_base = exponential_base
         self.jitter = jitter
         self.backoff_factor = backoff_factor
-    
+
     def get_delay(self, attempt: int) -> float:
         """Get retry delay for given attempt."""
         return calculate_retry_delay(
@@ -212,4 +218,4 @@ KAFKA_RETRY_CONFIG = RetryConfig(
     exponential_base=2.0,
     jitter=True,
     backoff_factor=0.1,
-) 
+)

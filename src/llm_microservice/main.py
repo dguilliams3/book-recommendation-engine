@@ -45,10 +45,10 @@ from .utils import (
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(),
-    ]
+    ],
 )
 logger = logging.getLogger(__name__)
 
@@ -62,41 +62,41 @@ config: Optional[ServiceConfig] = None
 async def startup_event():
     """Initialize services on startup."""
     global cache_service, logging_service, llm_service, config
-    
+
     try:
         # Load configuration
         config = ServiceConfig.from_env()
-        
+
         # Set up logging level
         logging.getLogger().setLevel(config.log_level)
-        
+
         logger.info(f"Starting {config.app_name} v{config.version}")
         logger.info(f"Debug mode: {config.debug}")
-        
+
         # Initialize cache service
         cache_service = CacheService(config.redis)
         logger.info("Cache service initialized")
-        
+
         # Initialize logging service
         logging_service = LoggingService(config.kafka, config.log_file)
         logger.info("Logging service initialized")
-        
+
         # Initialize LLM service
         llm_config = LLMConfig(
             model_name=config.default_model,
             temperature=config.default_temperature,
             max_tokens=config.default_max_tokens,
         )
-        
+
         llm_service = LLMService(
             config=llm_config,
             cache_service=cache_service,
             logging_service=logging_service,
         )
         logger.info("LLM service initialized")
-        
+
         logger.info("All services initialized successfully")
-        
+
     except Exception as e:
         logger.error(f"Failed to initialize services: {e}")
         logger.error(traceback.format_exc())
@@ -106,20 +106,20 @@ async def startup_event():
 async def shutdown_event():
     """Clean up services on shutdown."""
     global cache_service, logging_service, llm_service
-    
+
     logger.info("Shutting down services...")
-    
+
     try:
         if logging_service:
             logging_service.close()
             logger.info("Logging service closed")
-        
+
         if cache_service:
             cache_service.clear_expired()
             logger.info("Cache service cleaned up")
-        
+
         logger.info("All services shut down successfully")
-        
+
     except Exception as e:
         logger.error(f"Error during shutdown: {e}")
 
@@ -161,10 +161,10 @@ app.add_middleware(
 async def logging_middleware(request: Request, call_next):
     """Log all requests and responses."""
     start_time = datetime.utcnow()
-    
+
     try:
         response = await call_next(request)
-        
+
         # Log successful requests
         duration = (datetime.utcnow() - start_time).total_seconds() * 1000
         logger.info(
@@ -172,9 +172,9 @@ async def logging_middleware(request: Request, call_next):
             f"Status: {response.status_code} - "
             f"Duration: {duration:.2f}ms"
         )
-        
+
         return response
-        
+
     except Exception as e:
         # Log failed requests
         duration = (datetime.utcnow() - start_time).total_seconds() * 1000
@@ -189,10 +189,10 @@ async def logging_middleware(request: Request, call_next):
 @app.exception_handler(LLMServiceError)
 async def service_error_handler(request: Request, exc: LLMServiceError):
     """Handle service-specific errors."""
-    request_id = getattr(request.state, 'request_id', 'unknown')
+    request_id = getattr(request.state, "request_id", "unknown")
     error_response = create_error_response(request_id, exc)
     status_code = get_http_status_from_error(exc)
-    
+
     return JSONResponse(
         status_code=status_code,
         content=error_response.dict(),
@@ -202,16 +202,16 @@ async def service_error_handler(request: Request, exc: LLMServiceError):
 @app.exception_handler(ValidationError)
 async def validation_error_handler(request: Request, exc: ValidationError):
     """Handle Pydantic validation errors."""
-    request_id = getattr(request.state, 'request_id', 'unknown')
-    
+    request_id = getattr(request.state, "request_id", "unknown")
+
     # Convert Pydantic validation error to our format
     service_error = ServiceValidationError(
         message=str(exc),
         details={"validation_errors": exc.errors()},
     )
-    
+
     error_response = create_error_response(request_id, service_error)
-    
+
     return JSONResponse(
         status_code=400,
         content=error_response.dict(),
@@ -221,13 +221,13 @@ async def validation_error_handler(request: Request, exc: ValidationError):
 @app.exception_handler(Exception)
 async def general_error_handler(request: Request, exc: Exception):
     """Handle all other exceptions."""
-    request_id = getattr(request.state, 'request_id', 'unknown')
-    
+    request_id = getattr(request.state, "request_id", "unknown")
+
     logger.error(f"Unhandled exception: {exc}")
     logger.error(traceback.format_exc())
-    
+
     error_response = create_error_response(request_id, exc)
-    
+
     return JSONResponse(
         status_code=500,
         content=error_response.dict(),
@@ -239,28 +239,28 @@ async def health_check():
     """Health check endpoint."""
     try:
         dependencies = {}
-        
+
         # Check cache service
         if cache_service:
             cache_health = cache_service.health_check()
             dependencies["redis"] = cache_health["status"]
         else:
             dependencies["redis"] = "disabled"
-        
+
         # Check logging service
         if logging_service:
             logging_health = logging_service.health_check()
             dependencies["kafka"] = logging_health["status"]
         else:
             dependencies["kafka"] = "disabled"
-        
+
         # Check LLM service
         if llm_service:
             llm_health = llm_service.health_check()
             dependencies["langchain"] = llm_health["status"]
         else:
             dependencies["langchain"] = "disabled"
-        
+
         # Determine overall status
         statuses = list(dependencies.values())
         if all(status == "healthy" for status in statuses):
@@ -269,14 +269,14 @@ async def health_check():
             overall_status = "degraded"
         else:
             overall_status = "unhealthy"
-        
+
         return HealthResponse(
             status=overall_status,
             version=config.version if config else "unknown",
             timestamp=datetime.utcnow().isoformat() + "Z",
             dependencies=dependencies,
         )
-        
+
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         raise HTTPException(status_code=500, detail="Health check failed")
@@ -286,7 +286,7 @@ async def health_check():
 async def invoke_llm(request: LLMRequest):
     """
     Invoke the LLM with the provided request.
-    
+
     This endpoint handles:
     - Request validation
     - Caching and idempotency
@@ -296,43 +296,45 @@ async def invoke_llm(request: LLMRequest):
     """
     if not llm_service:
         raise HTTPException(status_code=503, detail="LLM service not available")
-    
+
     try:
         # Check for duplicate request (idempotency)
         if cache_service:
             cached_response = cache_service.get(request.request_id)
             if cached_response:
-                logger.info(f"Returning cached response for request {request.request_id}")
+                logger.info(
+                    f"Returning cached response for request {request.request_id}"
+                )
                 return LLMResponse(**cached_response)
-        
+
         # Validate authentication if enabled
         if config and config.enable_auth:
             # Here you would add your authentication logic
             # For now, we trust the OpenAI API key in the request
             pass
-        
+
         # Process the request
         response = llm_service.invoke(request)
-        
+
         logger.info(f"Successfully processed request {request.request_id}")
         return response
-        
+
     except DuplicateRequestError as e:
         logger.warning(f"Duplicate request detected: {request.request_id}")
         raise HTTPException(status_code=409, detail=str(e))
-    
+
     except AuthenticationError as e:
         logger.warning(f"Authentication failed for request {request.request_id}")
         raise HTTPException(status_code=401, detail=str(e))
-    
+
     except RateLimitError as e:
         logger.warning(f"Rate limit exceeded for request {request.request_id}")
         raise HTTPException(status_code=429, detail=str(e))
-    
+
     except OpenAIError as e:
         logger.error(f"OpenAI API error for request {request.request_id}: {e}")
         raise HTTPException(status_code=503, detail=str(e))
-    
+
     except Exception as e:
         logger.error(f"Unexpected error for request {request.request_id}: {e}")
         logger.error(traceback.format_exc())
@@ -349,16 +351,16 @@ async def get_stats():
             "uptime": "unknown",  # You could track this
         }
     }
-    
+
     if cache_service:
         stats["cache"] = cache_service.get_stats()
-    
+
     if logging_service:
         stats["logging"] = logging_service.get_stats()
-    
+
     if llm_service:
         stats["llm"] = llm_service.get_stats()
-    
+
     return stats
 
 
@@ -366,10 +368,10 @@ def main():
     """Run the FastAPI application."""
     # Load configuration
     service_config = ServiceConfig.from_env()
-    
+
     # Configure logging
     logging.getLogger().setLevel(service_config.log_level)
-    
+
     # Run the application
     uvicorn.run(
         "src.llm_microservice.main:app",
@@ -382,4 +384,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()
