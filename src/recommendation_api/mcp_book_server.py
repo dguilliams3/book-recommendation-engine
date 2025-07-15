@@ -673,8 +673,8 @@ async def query_catalog(
                 param_idx += 1
 
             if genre:
-                where_clauses.append(f"genre ? ${param_idx}")  # JSONB contains operator
-                params.append(genre)
+                where_clauses.append(f"genre ILIKE ${param_idx}")  # Case-insensitive text search
+                params.append(f"%{genre}%")
                 param_idx += 1
 
             if difficulty_band:

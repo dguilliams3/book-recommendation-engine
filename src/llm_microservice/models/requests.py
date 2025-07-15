@@ -100,7 +100,7 @@ class LLMRequest(BaseModel):
         ..., min_length=1, max_length=10000, description="User's prompt/message"
     )
     openai_api_key: str = Field(
-        ..., pattern=r"^sk-[a-zA-Z0-9]{32,}$", description="OpenAI API key"
+        ..., description="OpenAI API key (must start with 'sk-')"
     )
 
     # Optional fields with defaults

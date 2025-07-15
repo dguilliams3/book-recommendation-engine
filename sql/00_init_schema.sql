@@ -129,6 +129,59 @@ CREATE INDEX IF NOT EXISTS idx_student_vec_hnsw ON student_embeddings USING hnsw
 CREATE INDEX IF NOT EXISTS idx_book_vec_hnsw ON book_embeddings USING hnsw (vec vector_cosine_ops);
 
 -- ====================================================================
+-- READER MODE TABLES
+-- ====================================================================
+
+-- Public users for Reader Mode
+CREATE TABLE IF NOT EXISTS public_users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    hash_id TEXT UNIQUE NOT NULL,  -- SHA256 hash of identifier
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Books uploaded by Reader Mode users
+CREATE TABLE IF NOT EXISTS uploaded_books (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES public_users(id),
+    title TEXT,
+    author TEXT,
+    rating SMALLINT,  -- 1-5 user rating
+    notes TEXT,
+    raw_payload JSON,  -- Original upload data
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    
+    -- New production columns for efficient querying
+    isbn VARCHAR(20),
+    genre VARCHAR(100) DEFAULT 'General',
+    reading_level NUMERIC(3,1) DEFAULT 5.0,
+    read_date DATE,
+    confidence NUMERIC(3,2) DEFAULT 0.0  -- LLM confidence score (0-1)
+);
+
+-- Reader Mode feedback on recommendations
+CREATE TABLE IF NOT EXISTS feedback (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES public_users(id),
+    book_id VARCHAR NOT NULL REFERENCES catalog(book_id),
+    score SMALLINT NOT NULL,  -- +1 (thumbs up) or -1 (thumbs down)
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    
+    -- New column for direct hash access
+    user_hash_id VARCHAR(100)
+);
+
+-- ====================================================================
+-- READER MODE PERFORMANCE INDEXES
+-- ====================================================================
+
+-- Performance indexes for recommendation queries
+CREATE INDEX IF NOT EXISTS idx_uploaded_books_user_id ON uploaded_books(user_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_user_id ON feedback(user_id);
+CREATE INDEX IF NOT EXISTS idx_uploaded_books_genre ON uploaded_books(genre);
+CREATE INDEX IF NOT EXISTS idx_uploaded_books_reading_level ON uploaded_books(reading_level);
+CREATE INDEX IF NOT EXISTS idx_uploaded_books_confidence ON uploaded_books(confidence);
+
+-- ====================================================================
 -- COMMENTS FOR MAINTENANCE
 -- ====================================================================
 
@@ -139,10 +192,17 @@ COMMENT ON TABLE student_embeddings IS 'ML embeddings for student preference mod
 COMMENT ON TABLE book_embeddings IS 'ML embeddings for semantic book similarity (1536-dim from text-embedding-3-small)';
 COMMENT ON TABLE student_similarity IS 'Precomputed student similarity matrix for collaborative filtering';
 COMMENT ON TABLE student_profile_cache IS 'Cached student reading profiles for performance';
+COMMENT ON TABLE public_users IS 'Reader Mode users - anonymous public users who upload book lists';
+COMMENT ON TABLE uploaded_books IS 'Books uploaded by Reader Mode users with LLM enrichment';
+COMMENT ON TABLE feedback IS 'Reader Mode feedback on recommendations';
 
 COMMENT ON COLUMN catalog.reading_level IS 'Numeric reading level (e.g., 3.5 for mid-3rd grade level)';
 COMMENT ON COLUMN checkout.checkout_id IS 'Unique identifier for tracking individual checkout events';
 COMMENT ON COLUMN student_embeddings.last_event IS 'UUID of last event that updated this embedding';
 COMMENT ON COLUMN book_embeddings.last_event IS 'UUID of last event that updated this embedding';
 COMMENT ON COLUMN student_embeddings.vec IS '1536-dimensional vector from OpenAI text-embedding-3-small';
-COMMENT ON COLUMN book_embeddings.vec IS '1536-dimensional vector from OpenAI text-embedding-3-small'; 
+COMMENT ON COLUMN book_embeddings.vec IS '1536-dimensional vector from OpenAI text-embedding-3-small';
+COMMENT ON COLUMN uploaded_books.genre IS 'Book genre classified by LLM enrichment';
+COMMENT ON COLUMN uploaded_books.reading_level IS 'Estimated reading level from LLM (grade level as decimal)';
+COMMENT ON COLUMN uploaded_books.confidence IS 'LLM confidence score for enrichment (0-1)';
+COMMENT ON COLUMN uploaded_books.raw_payload IS 'Original upload data with LLM enrichment metadata'; 

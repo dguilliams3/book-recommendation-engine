@@ -153,6 +153,13 @@ class UploadedBook(Base):
     notes = Column(Text)
     raw_payload = Column(JSON)  # Original upload data
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    
+    # New production columns for efficient querying
+    isbn = Column(String(20))
+    genre = Column(String(100), default="General")
+    reading_level = Column(Float, default=5.0)  # Using Float instead of DECIMAL for SQLAlchemy
+    read_date = Column(Date)
+    confidence = Column(Float, default=0.0)  # LLM confidence score (0-1)
 
 
 class Feedback(Base):
@@ -165,6 +172,9 @@ class Feedback(Base):
     book_id = Column(String, ForeignKey("catalog.book_id"), nullable=False)
     score = Column(SmallInteger, nullable=False)  # +1 (thumbs up) or -1 (thumbs down)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    
+    # New column for direct hash access
+    user_hash_id = Column(String(100))
 
 
 # ====================================================================
@@ -181,6 +191,13 @@ Index("idx_catalog_rating", Catalog.average_rating)
 Index("idx_students_grade", Student.grade_level)
 Index("idx_students_teacher", Student.homeroom_teacher)
 Index("idx_similarity_score", StudentSimilarity.sim.desc())
+
+# Reader Mode performance indexes
+Index("idx_uploaded_books_user_hash_id", UploadedBook.user_id)  # Using user_id for now, will be updated to user_hash_id
+Index("idx_feedback_user_hash_id", Feedback.user_id)  # Using user_id for now, will be updated to user_hash_id
+Index("idx_uploaded_books_genre", UploadedBook.genre)
+Index("idx_uploaded_books_reading_level", UploadedBook.reading_level)
+Index("idx_uploaded_books_confidence", UploadedBook.confidence)
 
 # Vector indexes will be created manually as they require special syntax
 

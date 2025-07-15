@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     )  # kafka (Docker) or localhost (local)
     kafka_port: int = Field(9092, validation_alias="KAFKA_PORT")
 
+    # LLM Microservice configuration
+    llm_service_url: str = Field(
+        "http://llm_microservice:8000", validation_alias="LLM_SERVICE_URL"
+    )
+    llm_service_enabled: bool = Field(True, validation_alias="LLM_SERVICE_ENABLED")
+    llm_fallback_enabled: bool = Field(True, validation_alias="LLM_FALLBACK_ENABLED")
+    llm_request_timeout: int = Field(30, validation_alias="LLM_REQUEST_TIMEOUT")
+    llm_max_retries: int = Field(3, validation_alias="LLM_MAX_RETRIES")
+    llm_circuit_breaker_threshold: int = Field(5, validation_alias="LLM_CIRCUIT_BREAKER_THRESHOLD")
+    llm_circuit_breaker_timeout: int = Field(60, validation_alias="LLM_CIRCUIT_BREAKER_TIMEOUT")
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # If legacy DB_URL is provided, it takes precedence

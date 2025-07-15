@@ -21,15 +21,19 @@ from __future__ import annotations
 import asyncio, json, os, time
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, List, Tuple, Optional
 from collections import Counter
 
-from mcp import StdioServerParameters, stdio_client, ClientSession
-from langchain_openai import ChatOpenAI
+import numpy as np
+from fastapi import HTTPException
+from langchain.callbacks import AsyncCallbackHandler
+from langchain.schema import BaseMessage, HumanMessage, SystemMessage
+from langchain_community.vectorstores import FAISS
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import AIMessage
-from langchain.callbacks.base import AsyncCallbackHandler
+from mcp import StdioServerParameters, stdio_client, ClientSession
 from pydantic import BaseModel
 
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -51,6 +55,12 @@ from .candidate_builder import build_candidates
 from common.redis_utils import mark_recommended
 from common.reading_level_utils import get_student_reading_level_from_db
 from .config import reader_config
+from common.llm_client import (
+    get_llm_client,
+    enrich_recommendations_with_llm,
+    enrich_book_metadata,
+    LLMServiceError
+)
 
 logger = get_logger(__name__)
 
@@ -132,6 +142,331 @@ engine = create_async_engine(async_db_url, echo=False)
 # Performance optimization: Initialize connection pool
 connection_pool = None
 batch_processor = BatchProcessor(batch_size=20, max_concurrent=5)
+
+# Rating weights for semantic search (same as student system)
+RATING_WEIGHTS = {
+    5: 1.0,  # 5-star books get full weight
+    4: 0.7,  # 4-star books get 70% weight
+    3: 0.4,  # 3-star books get 40% weight
+    2: 0.1,  # 2-star books get 10% weight
+    1: 0.05,  # 1-star books get 5% weight
+}
+
+# Global cache for FAISS store to avoid reloading on every request
+_faiss_store_cache: Optional[FAISS] = None
+_book_id_to_index_cache: Optional[dict] = None
+
+
+def _get_faiss_store() -> Tuple[Optional[FAISS], Optional[dict]]:
+    """Load FAISS vector store with caching and build book_id lookup index."""
+    global _faiss_store_cache, _book_id_to_index_cache
+    
+    # Return cached version if available
+    if _faiss_store_cache is not None and _book_id_to_index_cache is not None:
+        return _faiss_store_cache, _book_id_to_index_cache
+    
+    try:
+        vector_dir = S.data_dir / "vector_store"
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+
+        if not (vector_dir / "index.faiss").exists():
+            logger.info(
+                "FAISS index not found, creating empty index",
+                extra={"path": str(vector_dir)},
+            )
+            # Create empty index so system can work
+            vector_dir.mkdir(parents=True, exist_ok=True)
+            store = FAISS.from_texts(
+                ["dummy"], embeddings, metadatas=[{"book_id": "dummy"}]
+            )
+            store.save_local(vector_dir)
+            logger.info("Empty FAISS index created")
+            
+            # Cache the empty store
+            _faiss_store_cache = store
+            _book_id_to_index_cache = {"dummy": 0}
+            return store, _book_id_to_index_cache
+
+        # Load the FAISS store
+        store = FAISS.load_local(
+            vector_dir, embeddings, allow_dangerous_deserialization=True
+        )
+        logger.info("FAISS store loaded", extra={"index_size": store.index.ntotal})
+        
+        # Build book_id to index mapping for O(1) lookup
+        logger.info("Building book_id to index mapping for fast lookup")
+        book_id_to_index = {}
+        
+        try:
+            for idx, doc_id in store.index_to_docstore_id.items():
+                doc = store.docstore.search(doc_id)
+                book_id = doc.metadata.get("book_id")
+                if book_id:
+                    book_id_to_index[book_id] = idx
+        except Exception as e:
+            logger.warning(f"Failed to build book_id index: {e}", exc_info=True)
+            book_id_to_index = {}
+        
+        logger.info(
+            "Book ID index built", 
+            extra={"total_books": len(book_id_to_index)}
+        )
+        
+        # Cache both store and index
+        _faiss_store_cache = store
+        _book_id_to_index_cache = book_id_to_index
+        
+        return store, book_id_to_index
+        
+    except ImportError as e:
+        logger.error(f"Missing required dependencies for FAISS: {e}")
+        return None, None
+    except FileNotFoundError as e:
+        logger.warning(f"FAISS vector store files not found: {e}")
+        return None, None
+    except Exception as e:
+        logger.error(f"Failed to load/create FAISS store: {e}", exc_info=True)
+        return None, None
+
+
+async def _semantic_book_candidates_reader(
+    uploaded_books: List[dict], 
+    feedback_scores: dict, 
+    user_hash_id: str, 
+    k: int = 20
+) -> List[str]:
+    """Find semantically similar books using FAISS search on user's uploaded books and feedback.
+    
+    This adapts the student semantic search logic for Reader Mode by:
+    1. Using uploaded books instead of checkout history
+    2. Weighting by user ratings and feedback scores
+    3. Considering both positive and negative feedback
+    4. Aggregating embeddings from multiple sources
+    
+    Algorithm:
+    1. Fetch user's uploaded books with ratings
+    2. Weight each book's embedding by its rating (5★=1.0, 4★=0.7, etc.)
+    3. Apply feedback score adjustments (positive feedback boosts, negative reduces)
+    4. Aggregate weighted embeddings into a single query vector
+    5. FAISS search for top k similar unseen books
+    
+    Returns:
+        List of book_ids from semantic search, or empty list if FAISS unavailable
+    """
+    logger.debug(
+        "Starting semantic book search for reader mode",
+        extra={"user_hash_id": user_hash_id, "target_candidates": k},
+    )
+
+    if not uploaded_books:
+        logger.debug(
+            "No uploaded books found for semantic search",
+            extra={"user_hash_id": user_hash_id},
+        )
+        return []
+
+    # Load FAISS store with caching
+    store, book_id_to_index = _get_faiss_store()
+    if not store or not book_id_to_index:
+        logger.debug("FAISS store unavailable for semantic search")
+        return []
+
+    # Aggregate weighted embeddings
+    weighted_embeddings = []
+    total_weight = 0.0
+
+    for uploaded_book in uploaded_books:
+        book_id = uploaded_book.get("book_id")
+        if not book_id:
+            continue
+            
+        # Get rating weight (default to 3-star weight if no rating)
+        rating = uploaded_book.get("rating", 3)
+        weight = RATING_WEIGHTS.get(rating, 0.4)
+        
+        # Apply feedback score adjustment
+        if book_id in feedback_scores:
+            feedback_score = feedback_scores[book_id]
+            # Positive feedback boosts weight, negative reduces it
+            if feedback_score > 0:
+                weight *= (1 + feedback_score * 0.5)  # Boost by up to 50%
+            else:
+                weight *= (1 + feedback_score * 0.3)  # Reduce by up to 30%
+                weight = max(weight, 0.01)  # Don't go below 1%
+
+        # Find book embedding in FAISS store using O(1) lookup
+        try:
+            doc_idx = book_id_to_index.get(book_id)
+            if doc_idx is not None:
+                embedding = store.index.reconstruct(doc_idx)
+                weighted_embeddings.append(embedding * weight)
+                total_weight += weight
+                logger.debug(
+                    "Found embedding for uploaded book",
+                    extra={"book_id": book_id, "weight": weight, "rating": rating}
+                )
+            else:
+                logger.debug(
+                    "Book ID not found in vector store",
+                    extra={"book_id": book_id}
+                )
+
+        except ValueError as e:
+            logger.warning(
+                f"Invalid vector index for book_id {book_id}: {e}",
+                extra={"book_id": book_id, "index": doc_idx}
+            )
+            continue
+        except Exception as e:
+            logger.warning(
+                f"Could not retrieve embedding for book_id {book_id}: {e}",
+                extra={"book_id": book_id}
+            )
+            continue
+
+    if not weighted_embeddings or total_weight == 0:
+        logger.debug(
+            "No valid embeddings found for aggregation",
+            extra={"user_hash_id": user_hash_id},
+        )
+        return []
+
+    # Create aggregated query vector
+    query_vector = np.sum(weighted_embeddings, axis=0) / total_weight
+
+    # Search for similar books
+    docs_with_scores = store.similarity_search_by_vector(
+        query_vector, k=k * 2
+    )  # Oversample
+
+    # Extract book_ids, filtering out already-uploaded books
+    uploaded_book_ids = {book.get("book_id") for book in uploaded_books if book.get("book_id")}
+
+    candidates = []
+    for doc in docs_with_scores:
+        book_id = doc.metadata.get("book_id")
+        if book_id and book_id not in uploaded_book_ids:
+            candidates.append(book_id)
+            if len(candidates) >= k:
+                break
+
+    logger.info(
+        "Semantic search completed for reader mode",
+        extra={
+            "user_hash_id": user_hash_id,
+            "uploaded_books_used": len(uploaded_books),
+            "semantic_candidates": len(candidates),
+            "total_weight": total_weight,
+        },
+    )
+
+    return candidates
+
+
+async def _query_based_semantic_candidates_reader(
+    query: str, 
+    uploaded_books: List[dict], 
+    feedback_scores: dict,
+    user_hash_id: str, 
+    k: int = 10
+) -> List[str]:
+    """Find books semantically similar to the user's query with reader context.
+    
+    Enhanced to consider user context:
+    - User's reading level preferences from uploaded books
+    - User's favorite genres from uploaded books
+    - User's feedback history
+    - Combines query with user profile for personalized search
+    
+    Algorithm:
+    1. Enhance query with user context from uploaded books
+    2. Embed the enhanced query text
+    3. FAISS search for most similar books
+    4. Return top k book_ids
+    """
+    logger.debug(
+        "Starting query-based semantic search for reader mode",
+        extra={"query": query, "user_hash_id": user_hash_id, "target_candidates": k},
+    )
+
+    try:
+        # Load FAISS store with caching
+        store, _ = _get_faiss_store()
+        if not store:
+            logger.debug("FAISS store unavailable for query search")
+            return []
+
+        # Enhance query with user context
+        enhanced_query = query
+        
+        if uploaded_books:
+            # Calculate preferred reading level
+            levels = [
+                book.get("reading_level", 5.0) 
+                for book in uploaded_books 
+                if book.get("reading_level")
+            ]
+            avg_level = round(sum(levels) / len(levels), 1) if levels else 5.0
+
+            # Find most common genres
+            genre_counts = {}
+            for book in uploaded_books:
+                if book.get("genre"):
+                    genre_counts[book["genre"]] = genre_counts.get(book["genre"], 0) + 1
+
+            top_genres = sorted(
+                genre_counts.items(), key=lambda x: x[1], reverse=True
+            )[:3]
+
+            # Build context string
+            context_parts = []
+            if top_genres:
+                context_parts.append(f"genres: {', '.join(g[0] for g in top_genres)}")
+            if avg_level:
+                context_parts.append(f"reading level: {avg_level}")
+                
+            if context_parts:
+                enhanced_query = f"{query} (prefers: {', '.join(context_parts)})"
+
+        # Embed the enhanced query
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        query_embedding = embeddings.embed_query(enhanced_query)
+
+        # Search for similar books
+        docs_with_scores = store.similarity_search_by_vector(
+            query_embedding, k=k * 2
+        )  # Oversample
+
+        # Extract book_ids, filtering out already-uploaded books
+        uploaded_book_ids = {book.get("book_id") for book in uploaded_books if book.get("book_id")}
+
+        candidates = []
+        for doc in docs_with_scores:
+            book_id = doc.metadata.get("book_id")
+            if book_id and book_id not in uploaded_book_ids:
+                candidates.append(book_id)
+                if len(candidates) >= k:
+                    break
+
+        logger.info(
+            "Query-based semantic search completed for reader mode",
+            extra={
+                "user_hash_id": user_hash_id,
+                "original_query": query,
+                "enhanced_query": enhanced_query,
+                "semantic_candidates": len(candidates),
+            },
+        )
+
+        return candidates
+
+    except Exception:
+        logger.warning(
+            "Query-based semantic search failed for reader mode", 
+            exc_info=True, 
+            extra={"user_hash_id": user_hash_id}
+        )
+        return []
 
 
 async def get_db_connection():
@@ -259,11 +594,12 @@ async def _fetch_user_uploaded_books_cached(user_hash_id: str) -> List[dict]:
                 result = await conn.execute(
                     text(
                         """
-                    SELECT book_id, title, author, isbn, genre, reading_level, 
-                           user_rating, read_date, notes, created_at
-                    FROM uploaded_books 
-                    WHERE user_hash_id = :user_hash_id 
-                    ORDER BY created_at DESC
+                    SELECT ub.id as book_id, ub.title, ub.author, ub.isbn, ub.genre, ub.reading_level, 
+                           ub.rating as user_rating, ub.read_date, ub.notes, ub.created_at
+                    FROM uploaded_books ub
+                    JOIN public_users pu ON ub.user_id = pu.id
+                    WHERE pu.hash_id = :user_hash_id 
+                    ORDER BY ub.created_at DESC
                 """
                     ),
                     {"user_hash_id": user_hash_id},
@@ -303,9 +639,10 @@ async def _fetch_user_feedback_scores_cached(user_hash_id: str) -> dict:
                 result = await conn.execute(
                     text(
                         """
-                    SELECT book_id, score, created_at
-                      FROM feedback
-                     WHERE user_hash_id = :user_hash_id
+                    SELECT f.book_id, f.score, f.created_at
+                      FROM feedback f
+                      JOIN public_users pu ON f.user_id = pu.id
+                     WHERE pu.hash_id = :user_hash_id
                 """
                     ),
                     {"user_hash_id": user_hash_id},
@@ -687,7 +1024,7 @@ def _calculate_similarity_score(
 
 
 def _create_justification(
-    book: dict, uploaded_books: List[dict], feedback_scores: dict
+    book: dict, uploaded_books: List[dict], feedback_scores: dict, semantic_boost: bool = False
 ) -> str:
     """Create justification text for why a book was recommended."""
     justification_parts = []
@@ -706,6 +1043,10 @@ def _create_justification(
     book_id = book["book_id"]
     if book_id in feedback_scores and feedback_scores[book_id] > 0:
         justification_parts.append("Based on your positive feedback")
+
+    # Add semantic search indication if this was found via semantic search
+    if semantic_boost:
+        justification_parts.append("Semantically similar to your books")
 
     if not justification_parts:
         justification_parts.append("Matches your reading preferences")
@@ -819,19 +1160,87 @@ async def generate_reader_recommendations(
             # Fetch user's feedback history
             feedback_scores = await _fetch_user_feedback_scores(user_hash_id, conn)
 
-            # Find similar books in catalog
-            similar_books = await _fetch_similar_books(
-                uploaded_books, user_hash_id, conn
+            # Get semantic candidates using FAISS vector search
+            semantic_candidates = await _semantic_book_candidates_reader(
+                uploaded_books, feedback_scores, user_hash_id, k=30
             )
-
-            # Calculate similarity scores for all candidates
-            candidates = []
-            for book in similar_books:
-                similarity_score = _calculate_similarity_score(
-                    book, uploaded_books, feedback_scores, query
+            
+            # Get query-based semantic candidates if query provided
+            query_candidates = []
+            if query.strip():
+                query_candidates = await _query_based_semantic_candidates_reader(
+                    query, uploaded_books, feedback_scores, user_hash_id, k=15
                 )
-                book["similarity_score"] = similarity_score
-                candidates.append(book)
+            
+            # Combine all candidate book IDs
+            all_candidate_ids = list(set(semantic_candidates + query_candidates))
+            
+            # Fetch full book details for candidates
+            candidates = []
+            if all_candidate_ids:
+                # Secure parameterized query construction
+                if len(all_candidate_ids) > 1000:  # Prevent oversized queries
+                    logger.warning(
+                        "Too many candidate IDs, truncating to 1000",
+                        extra={"user_hash_id": user_hash_id, "count": len(all_candidate_ids)}
+                    )
+                    all_candidate_ids = all_candidate_ids[:1000]
+                
+                # Use ANY() for secure parameterized query
+                candidate_result = await conn.execute(
+                    text(
+                        """
+                        SELECT c.book_id, c.title, c.author, c.genre, c.reading_level, 
+                               c.description as librarian_blurb, c.isbn, c.average_rating
+                        FROM catalog c
+                        WHERE c.book_id = ANY(:book_ids)
+                        """
+                    ),
+                    {"book_ids": all_candidate_ids}
+                )
+                
+                for row in candidate_result.fetchall():
+                    book = {
+                        "book_id": row.book_id,
+                        "title": row.title,
+                        "author": row.author,
+                        "genre": row.genre,
+                        "reading_level": row.reading_level or 5.0,
+                        "librarian_blurb": row.librarian_blurb,
+                        "isbn": row.isbn,
+                        "average_rating": row.average_rating,
+                    }
+                    
+                    # Calculate semantic similarity score
+                    similarity_score = _calculate_similarity_score(
+                        book, uploaded_books, feedback_scores, query
+                    )
+                    
+                    # Boost score for semantic candidates
+                    if book["book_id"] in semantic_candidates:
+                        similarity_score += 2.0  # Semantic boost
+                    if book["book_id"] in query_candidates:
+                        similarity_score += 1.5  # Query boost
+                        
+                    book["similarity_score"] = similarity_score
+                    candidates.append(book)
+            
+            # If no semantic candidates, fall back to traditional similarity
+            if not candidates:
+                logger.info(
+                    "No semantic candidates found, falling back to traditional similarity",
+                    extra={"user_hash_id": user_hash_id}
+                )
+                similar_books = await _fetch_similar_books(
+                    uploaded_books, user_hash_id, conn
+                )
+                
+                for book in similar_books:
+                    similarity_score = _calculate_similarity_score(
+                        book, uploaded_books, feedback_scores, query
+                    )
+                    book["similarity_score"] = similarity_score
+                    candidates.append(book)
 
             # Sort by similarity score and take top N
             candidates.sort(key=lambda x: x["similarity_score"], reverse=True)
@@ -849,9 +1258,18 @@ async def generate_reader_recommendations(
 
             # Build final recommendations
             recommendations = []
+            seen_book_ids = set()
             for candidate in top_candidates:
+                if candidate["book_id"] in seen_book_ids:
+                    continue  # Skip duplicates
+                
+                seen_book_ids.add(candidate["book_id"])
+                
+                # Check if this was a semantic candidate
+                semantic_boost = candidate["book_id"] in semantic_candidates
+                
                 justification = _create_justification(
-                    candidate, uploaded_books, feedback_scores
+                    candidate, uploaded_books, feedback_scores, semantic_boost
                 )
 
                 recommendation = BookRecommendation(
@@ -884,12 +1302,98 @@ async def generate_reader_recommendations(
                 },
             )
 
-            return recommendations, {
+            # Try to enhance recommendations with LLM microservice
+            final_recommendations = recommendations
+            llm_enhanced = False
+            
+            if S.llm_service_enabled and recommendations:
+                try:
+                    # Prepare context for LLM enrichment
+                    user_context = {
+                        "user_hash_id": user_hash_id,
+                        "uploaded_books": uploaded_books,
+                        "feedback_scores": feedback_scores
+                    }
+                    
+                    # Convert BookRecommendation objects to dictionaries for LLM processing
+                    rec_dicts = []
+                    for rec in recommendations:
+                        rec_dict = {
+                            "book_id": rec.book_id,
+                            "title": rec.title,
+                            "author": rec.author,
+                            "reading_level": rec.reading_level,
+                            "genre": getattr(rec, 'genre', 'Unknown'),
+                            "justification": rec.justification
+                        }
+                        rec_dicts.append(rec_dict)
+                    
+                    # Enhance with LLM
+                    enhanced_rec_dicts = await enrich_recommendations_with_llm(
+                        rec_dicts, user_context, query, request_id
+                    )
+                    
+                    # Convert back to BookRecommendation objects
+                    final_recommendations = []
+                    seen_book_ids = set()
+                    for enhanced_dict in enhanced_rec_dicts:
+                        if enhanced_dict["book_id"] in seen_book_ids:
+                            continue  # Skip duplicates
+                        
+                        seen_book_ids.add(enhanced_dict["book_id"])
+                        
+                        # Check if this was a semantic candidate
+                        semantic_boost = enhanced_dict["book_id"] in semantic_candidates
+                        
+                        # Recreate justification with semantic boost info
+                        book_dict = {
+                            "book_id": enhanced_dict["book_id"],
+                            "title": enhanced_dict["title"],
+                            "author": enhanced_dict["author"],
+                            "genre": enhanced_dict.get("genre", "Unknown"),
+                        }
+                        justification = _create_justification(
+                            book_dict, uploaded_books, feedback_scores, semantic_boost
+                        )
+                        
+                        enhanced_rec = BookRecommendation(
+                            book_id=enhanced_dict["book_id"],
+                            title=enhanced_dict["title"],
+                            author=enhanced_dict["author"],
+                            reading_level=enhanced_dict["reading_level"],
+                            librarian_blurb=enhanced_dict.get("librarian_blurb", "No description available"),
+                            justification=justification
+                        )
+                        final_recommendations.append(enhanced_rec)
+                    
+                    llm_enhanced = True
+                    logger.info(
+                        "Successfully enhanced reader recommendations with LLM",
+                        extra={"request_id": request_id, "user_hash_id": user_hash_id}
+                    )
+                    
+                except LLMServiceError as e:
+                    logger.warning(
+                        f"LLM service failed, using base recommendations: {e}",
+                        extra={"request_id": request_id, "user_hash_id": user_hash_id}
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error during LLM enhancement: {e}",
+                        extra={"request_id": request_id, "user_hash_id": user_hash_id},
+                        exc_info=True
+                    )
+
+            return final_recommendations, {
                 "agent_duration": duration,
                 "tool_count": 1,
-                "tools": ["similarity_matching"],
+                "tools": ["semantic_search"] + (["llm_enhancement"] if llm_enhanced else []),
                 "error_count": 0,
                 "based_on_books": based_on_books,
+                "llm_enhanced": llm_enhanced,
+                "semantic_candidates": len(semantic_candidates),
+                "query_candidates": len(query_candidates),
+                "total_candidates": len(candidates),
             }
 
     except Exception as exc:
@@ -995,6 +1499,16 @@ async def generate_agent_recommendations(
                         BookRecommendation(**r.model_dump())
                         for r in parsed.recommendations
                     ]
+
+                    # Deduplicate recommendations by book_id
+                    seen_book_ids = set()
+                    deduplicated_recs = []
+                    for rec in valid_recs:
+                        if rec.book_id not in seen_book_ids:
+                            seen_book_ids.add(rec.book_id)
+                            deduplicated_recs.append(rec)
+                    
+                    valid_recs = deduplicated_recs
 
                     if not valid_recs:
                         logger.warning(

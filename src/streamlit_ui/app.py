@@ -5,6 +5,7 @@ import io
 import json
 import os
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -529,6 +530,28 @@ def get_table_df(table_name):
         return pd.DataFrame({"error": [str(e)]})
 
 
+def get_table_data(table_name):
+    """Get table data with UUID serialization fix for Streamlit"""
+    try:
+        # Use the same DB URL as the rest of the app
+        engine = create_engine(str(S.db_url).replace("+asyncpg", ""))
+        with engine.connect() as conn:
+            df = pd.read_sql(f"SELECT * FROM {table_name} LIMIT 100", conn)
+            
+            # Convert UUID columns to strings to avoid PyArrow serialization issues
+            for col in df.columns:
+                if df[col].dtype == 'object':
+                    # Check if column contains UUID objects
+                    sample_values = df[col].dropna().head(10)
+                    if sample_values.any() and all(isinstance(v, uuid.UUID) for v in sample_values):
+                        df[col] = df[col].astype(str)
+            
+            return df
+    except Exception as e:
+        logger.error(f"Failed to fetch table {table_name}: {e}")
+        return pd.DataFrame({"error": [str(e)]})
+
+
 def main():
     logger.info("Starting Streamlit UI")
     st.title("📚 Elementary School Book Recommender")
@@ -550,9 +573,10 @@ def main():
         if S.enable_reader_mode:
             mode = st.radio(
                 "**Recommendation Mode**",
-                ["🎓 Student Mode", "📚 Reader Mode"],
+                ["📚 Reader Mode", "🎓 Student Mode"],
                 horizontal=True,
-                help="Student Mode: Get recommendations by student ID. Reader Mode: Upload your books for personalized recommendations.",
+                index=0,  # Default to Reader Mode (first option)
+                help="Reader Mode: Upload your books for personalized recommendations. Student Mode: Get recommendations by student ID.",
             )
         else:
             mode = "🎓 Student Mode"
@@ -790,7 +814,7 @@ def main():
                             col1, col2, col3 = st.columns([1, 1, 6])
                             with col1:
                                 if st.button(
-                                    "👍", key=f"thumbs_up_{rec.get('book_id', i)}"
+                                    "👍", key=f"thumbs_up_{rec.get('book_id', i)}_{i}"
                                 ):
                                     feedback_result = submit_feedback(
                                         user_hash_id, rec.get("book_id", ""), 1
@@ -803,7 +827,7 @@ def main():
                                         st.success("👍 Thanks for the feedback!")
                             with col2:
                                 if st.button(
-                                    "👎", key=f"thumbs_down_{rec.get('book_id', i)}"
+                                    "👎", key=f"thumbs_down_{rec.get('book_id', i)}_{i}"
                                 ):
                                     feedback_result = submit_feedback(
                                         user_hash_id, rec.get("book_id", ""), -1
@@ -969,10 +993,78 @@ def main():
 
     with tab3:
         st.header("🗄️ Database Explorer")
-        for table in ["students", "catalog", "checkout", "student_similarity"]:
-            st.subheader(f"Table: {table}")
-            df = get_table_df(table)
-            st.dataframe(df)
+        
+        # Get all available tables
+        try:
+            engine = create_engine(str(S.db_url).replace("+asyncpg", ""))
+            with engine.connect() as conn:
+                # Get list of all tables
+                result = conn.execute(text("""
+                    SELECT table_name 
+                    FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    ORDER BY table_name
+                """))
+                tables = [row[0] for row in result]
+        except Exception as e:
+            st.error(f"Failed to get table list: {e}")
+            tables = ["students", "catalog", "checkout", "student_similarity"]  # Fallback
+        
+        if not tables:
+            st.warning("No tables found in database")
+            return
+        
+        # Table selector
+        selected_table = st.selectbox(
+            "Select a table to explore:",
+            tables,
+            help="Choose a table to view its schema and data"
+        )
+        
+        if selected_table:
+            st.subheader(f"📋 Table: {selected_table}")
+            
+            # Get table schema
+            try:
+                with engine.connect() as conn:
+                    schema_result = conn.execute(text(f"""
+                        SELECT column_name, data_type, is_nullable, column_default
+                        FROM information_schema.columns 
+                        WHERE table_name = '{selected_table}'
+                        ORDER BY ordinal_position
+                    """))
+                    schema_data = [{"Column": row[0], "Type": row[1], "Nullable": row[2], "Default": row[3]} for row in schema_result]
+                    schema_df = pd.DataFrame(schema_data)
+            except Exception as e:
+                st.error(f"Failed to get schema: {e}")
+                schema_df = pd.DataFrame()
+            
+            # Display schema
+            if not schema_df.empty:
+                st.write("**Schema:**")
+                st.dataframe(schema_df, use_container_width=True)
+                st.divider()
+            
+            # Get and display data
+            try:
+                df = get_table_data(selected_table)
+                if not df.empty:
+                    st.write(f"**Data Preview (showing up to 100 rows):**")
+                    
+                    # Add download button
+                    csv = df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download CSV",
+                        data=csv,
+                        file_name=f"{selected_table}_data.csv",
+                        mime="text/csv"
+                    )
+                    
+                    st.dataframe(df, use_container_width=True)
+                else:
+                    st.info("Table is empty or no data available")
+            except Exception as e:
+                st.error(f"Failed to load table data: {e}")
 
     # ---------------------------------------------------------------------
     # Logs tab – lightweight viewer for service_logs.jsonl produced by

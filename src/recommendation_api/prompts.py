@@ -80,6 +80,7 @@ Requirements:
 * The JSON **must** conform to the schema described in the {format_instructions} placeholder below.
 * Pick books that match the reading level (within ±1 grade) unless no match exists.
 * Be diverse in genre and author.
+* **CRITICAL: Do NOT recommend the same book_id more than once. Each recommendation must have a unique book_id.**
 * The ``librarian_blurb`` should be short (≤25 words).
 * Provide a separate ``justification`` field (≤25 words) explaining **why** the title is a good fit.
 * You **must** include the author, reading_level, and justification for each book in your response.
@@ -246,6 +247,7 @@ Query: {query if query else "No specific query"}
 Please recommend exactly {n} books from the available candidates above.
 Consider the user's uploaded books, feedback history, and preferences.
 Avoid recommending books they've already read or given negative feedback on.
+**IMPORTANT: Each recommendation must have a unique book_id - do not repeat the same book.**
 """
 
     return _READER_BASE_PROMPT.format_prompt(

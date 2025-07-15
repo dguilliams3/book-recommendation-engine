@@ -299,6 +299,24 @@ async def health():
         health_status["components"]["redis"] = {"status": "unhealthy", "error": str(e)}
         health_status["status"] = "degraded"
 
+    # Test LLM microservice connection
+    try:
+        from common.llm_client import get_llm_client
+        
+        llm_client = get_llm_client()
+        llm_health = await llm_client.health_check()
+        health_status["components"]["llm_service"] = llm_health
+        
+        if llm_health["status"] != "healthy":
+            health_status["status"] = "degraded"
+            
+    except Exception as e:
+        health_status["components"]["llm_service"] = {
+            "status": "unhealthy", 
+            "error": str(e)
+        }
+        health_status["status"] = "degraded"
+
     # Test OpenAI API availability (lightweight check)
     try:
         # Just check if we have API key configured
@@ -1042,6 +1060,39 @@ async def _prometheus_middleware(request: Request, call_next):  # noqa: D401
     ).inc()
 
     return response
+
+
+@app.get("/llm-stats")
+async def get_llm_stats():
+    """Get LLM service statistics and performance metrics."""
+    try:
+        from common.llm_client import get_llm_client
+        
+        llm_client = get_llm_client()
+        stats = llm_client.get_stats()
+        
+        # Add health check info
+        health = await llm_client.health_check()
+        stats["health"] = health
+        
+        return {
+            "timestamp": time.time(),
+            "llm_service": stats
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get LLM stats: {e}")
+        return {
+            "timestamp": time.time(),
+            "error": str(e),
+            "llm_service": {
+                "status": "error",
+                "request_count": 0,
+                "success_count": 0,
+                "failure_count": 0,
+                "fallback_count": 0
+            }
+        }
 
 
 # ---------------------------------------------------------------------------

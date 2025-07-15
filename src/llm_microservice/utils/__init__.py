@@ -12,6 +12,7 @@ from .validation import validate_request_id, sanitize_content
 from .errors import (
     LLMServiceError,
     create_error_response,
+    get_http_status_from_error,
     AuthenticationError,
     DuplicateRequestError,
     RateLimitError,
@@ -28,6 +29,7 @@ __all__ = [
     "sanitize_content",
     "LLMServiceError",
     "create_error_response",
+    "get_http_status_from_error",
     "AuthenticationError",
     "DuplicateRequestError",
     "RateLimitError",

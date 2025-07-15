@@ -35,6 +35,7 @@ from common.kafka_utils import publish_event
 from common.events import UserUploadedEvent, USER_UPLOADED_TOPIC
 from common.metrics import REQUEST_COUNTER, REQUEST_LATENCY
 from common.models import PublicUser, UploadedBook
+from common.llm_client import enrich_book_metadata, LLMServiceError
 
 logger = get_logger(__name__)
 
@@ -145,26 +146,67 @@ async def upsert_user(user_hash_id: str) -> str:
         return str(user.id)
 
 
-async def store_books(user_id: str, books: List[Dict[str, Any]]) -> List[str]:
-    """Store books in database and return book IDs"""
+async def store_books(user_id: str, books: List[Dict[str, Any]], request_id: str = None) -> List[str]:
+    """Store books in database with optional LLM enrichment and return book IDs"""
     book_ids = []
+    enriched_count = 0
 
     async with async_session() as session:
         for book_data in books:
-            # Create book record
+            # Try to enrich book metadata with LLM if enabled
+            enriched_data = book_data.copy()
+            
+            if S.llm_service_enabled:
+                try:
+                    enriched_data = await enrich_book_metadata(
+                        book_data, 
+                        request_id or str(uuid.uuid4())
+                    )
+                    enriched_count += 1
+                    logger.info(
+                        f"Enriched book metadata: {enriched_data.get('title', 'Unknown')}",
+                        extra={"user_id": user_id, "enriched": True}
+                    )
+                except LLMServiceError as e:
+                    logger.warning(
+                        f"LLM enrichment failed for book '{book_data.get('title', 'Unknown')}': {e}",
+                        extra={"user_id": user_id, "book_title": book_data.get("title")}
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error during book enrichment: {e}",
+                        extra={"user_id": user_id, "book_title": book_data.get("title")},
+                        exc_info=True
+                    )
+
+            # Create book record with enriched data
             book = UploadedBook(
                 user_id=uuid.UUID(user_id),
-                title=book_data.get("title"),
-                author=book_data.get("author"),
-                rating=book_data.get("rating"),
-                notes=book_data.get("notes"),
-                raw_payload=book_data,
+                title=enriched_data.get("title") or book_data.get("title"),
+                author=enriched_data.get("author") or book_data.get("author"),
+                rating=enriched_data.get("rating") or book_data.get("rating"),
+                notes=enriched_data.get("notes") or book_data.get("notes"),
+                raw_payload=enriched_data,
+                # Extract enriched metadata into individual columns
+                isbn=enriched_data.get("isbn"),
+                genre=enriched_data.get("genre", "General"),
+                reading_level=enriched_data.get("reading_level", 5.0),
+                read_date=enriched_data.get("read_date"),
+                confidence=enriched_data.get("confidence", 0.0),
             )
             session.add(book)
             book_ids.append(str(book.id))
 
         await session.commit()
-        logger.info("Stored books", extra={"user_id": user_id, "count": len(books)})
+        logger.info(
+            "Stored books with enrichment",
+            extra={
+                "user_id": user_id,
+                "total_books": len(books),
+                "enriched_books": enriched_count,
+                "enrichment_rate": enriched_count / len(books) if books else 0
+            }
+        )
 
     return book_ids
 
@@ -187,16 +229,15 @@ async def upload_books_json(request: BooksUploadRequest):
         # Convert books to dict format
         books_data = [book.model_dump() for book in request.books]
 
-        # Store books
-        book_ids = await store_books(user_id, books_data)
+        # Store books with enrichment
+        upload_id = str(uuid.uuid4())
+        book_ids = await store_books(user_id, books_data, upload_id)
 
         # Publish event
         event = UserUploadedEvent(
             user_hash_id=user_hash_id, book_count=len(books_data), book_ids=book_ids
         )
         await publish_event(USER_UPLOADED_TOPIC, event.model_dump())
-
-        upload_id = str(uuid.uuid4())
 
         return UploadResponse(
             message="Books uploaded successfully",
@@ -236,16 +277,15 @@ async def upload_books_csv(
         # Upsert user
         user_id = await upsert_user(user_hash_id)
 
-        # Store books
-        book_ids = await store_books(user_id, books_data)
+        # Store books with enrichment
+        upload_id = str(uuid.uuid4())
+        book_ids = await store_books(user_id, books_data, upload_id)
 
         # Publish event
         event = UserUploadedEvent(
             user_hash_id=user_hash_id, book_count=len(books_data), book_ids=book_ids
         )
         await publish_event(USER_UPLOADED_TOPIC, event.dict())
-
-        upload_id = str(uuid.uuid4())
 
         return UploadResponse(
             message="Books uploaded successfully",

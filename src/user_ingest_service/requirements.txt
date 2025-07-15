@@ -6,4 +6,6 @@ asyncpg>=0.29.0
 aiokafka>=0.10.0
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
-prometheus-client>=0.22.0 
+prometheus-client>=0.22.0
+httpx>=0.25.0
+langchain-openai 
