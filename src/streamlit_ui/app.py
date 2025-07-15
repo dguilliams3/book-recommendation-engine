@@ -592,20 +592,12 @@ def main():
             st.subheader("🎓 Student Recommendations")
 
             with st.form("student_recommendation_form"):
-                # Student ID input with autocomplete
-                student_ids = get_all_student_ids()
-
-                if not student_ids:
-                    st.warning(
-                        "⚠️ No students found. Is the ingestion service finished?"
-                    )
-                    student_id = ""
-                else:
-                    student_id = st.selectbox(
-                        "Student ID",
-                        options=student_ids,
-                        placeholder="Type or pick a student ID",
-                    )
+                # Student ID input with autocomplete - only load when form is submitted
+                student_id = st.text_input(
+                    "Student ID",
+                    placeholder="Enter student ID (e.g., S001, S002)",
+                    help="Enter a student ID to get personalized recommendations"
+                )
 
                 interests = st.text_area(
                     "Keywords/Interests (comma-separated)",
@@ -617,17 +609,27 @@ def main():
                 submitted = st.form_submit_button("Get Student Recommendations")
 
                 if submitted:
-                    with st.spinner("Getting recommendation..."):
-                        result = get_recommendation(
-                            student_id, interests, num_recommendations
+                    # Only load student IDs when form is submitted
+                    student_ids = get_all_student_ids()
+                    
+                    if not student_ids:
+                        st.warning(
+                            "⚠️ No students found. Is the ingestion service finished?"
                         )
+                    elif student_id not in student_ids:
+                        st.error(f"⚠️ Student ID '{student_id}' not found. Available IDs: {', '.join(student_ids[:10])}{'...' if len(student_ids) > 10 else ''}")
+                    else:
+                        with st.spinner("Getting recommendation..."):
+                            result = get_recommendation(
+                                student_id, interests, num_recommendations
+                            )
 
-                        if "error" in result:
-                            st.error(result["error"])
-                            st.json(result)
-                        else:
-                            st.success("Recommendation received!")
-                            st.json(result)
+                            if "error" in result:
+                                st.error(result["error"])
+                                st.json(result)
+                            else:
+                                st.success("Recommendation received!")
+                                st.json(result)
 
         else:
             # READER MODE - new functionality
@@ -791,12 +793,46 @@ def main():
                                     st.success(
                                         "🎉 Here are your personalized recommendations!"
                                     )
-                                    st.session_state["recommendations"] = result.get(
+                                    # Use tab-specific session state to prevent bleeding across tabs
+                                    st.session_state["reader_recommendations"] = result.get(
                                         "recommendations", []
                                     )
+                                    # Clear any existing recommendations timestamp for freshness indicator
+                                    st.session_state["reader_recommendations_time"] = time.time()
 
                 # After the form (outside the form context)
-                recommendations = st.session_state.get("recommendations", [])
+                # Only show recommendations in this tab, not globally
+                recommendations = st.session_state.get("reader_recommendations", [])
+                recommendations_time = st.session_state.get("reader_recommendations_time", None)
+                
+                # Add clear recommendations button and freshness indicator
+                if recommendations:
+                    col1, col2, col3 = st.columns([2, 1, 1])
+                    with col1:
+                        if recommendations_time:
+                            time_ago = int(time.time() - recommendations_time)
+                            if time_ago < 60:
+                                st.success(f"✨ Fresh recommendations (generated {time_ago}s ago)")
+                            else:
+                                st.info(f"📋 Cached recommendations (generated {time_ago//60}m ago)")
+                    with col2:
+                        if st.button("🔄 New Recommendations", help="Get fresh recommendations"):
+                            # Clear cached recommendations to force new ones
+                            if "reader_recommendations" in st.session_state:
+                                del st.session_state["reader_recommendations"]
+                            if "reader_recommendations_time" in st.session_state:
+                                del st.session_state["reader_recommendations_time"]
+                            st.rerun()
+                    with col3:
+                        if st.button("🗑️ Clear", help="Clear recommendations"):
+                            # Clear recommendations from view
+                            if "reader_recommendations" in st.session_state:
+                                del st.session_state["reader_recommendations"]
+                            if "reader_recommendations_time" in st.session_state:
+                                del st.session_state["reader_recommendations_time"]
+                            st.rerun()
+                    st.divider()
+                
                 if recommendations:
                     for i, rec in enumerate(recommendations, 1):
                         with st.container():
@@ -1143,6 +1179,55 @@ def main():
                     .sort_values("timestamp", ascending=False)
                     .reset_index(drop=True)
                 )
+
+    # ---------------------------------------------------------------------
+    # Footer - Developer Attribution and Contact Information
+    # ---------------------------------------------------------------------
+    
+    st.markdown("---")
+    
+    # Create a subtle footer with developer info
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown(
+            """
+            <div style="text-align: center; color: #666; font-size: 0.85em; padding: 8px 0;">
+                Built with ❤️ by <a href="https://danguilliams.com" target="_blank" style="color: #0066cc; text-decoration: none;">Dan Guilliams</a>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    
+    with col2:
+        st.markdown(
+            """
+            <div style="text-align: center; color: #666; font-size: 0.85em; padding: 8px 0;">
+                <a href="https://github.com/dguilliams3/book-recommendation-engine" target="_blank" style="color: #0066cc; text-decoration: none;">📚 GitHub</a>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    
+    with col3:
+        st.markdown(
+            """
+            <div style="text-align: center; color: #666; font-size: 0.85em; padding: 8px 0;">
+                <a href="https://buymeacoffee.com/danguilliams" target="_blank" style="color: #0066cc; text-decoration: none;">☕ Buy me a coffee</a>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    
+    # Add a subtle help text
+    st.markdown(
+        """
+        <div style="text-align: center; color: #888; font-size: 0.75em; margin-top: 5px;">
+            Found bugs? Have suggestions? Feel free to reach out!
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 
 if __name__ == "__main__":

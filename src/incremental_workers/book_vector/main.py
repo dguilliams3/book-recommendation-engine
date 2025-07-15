@@ -29,7 +29,7 @@ async def ensure_store():
 
 async def update_faiss_index_atomic(
     texts: list[str], metadatas: list[dict], event_id: str
-):
+) -> int:
     """Atomically update FAISS index with backup/restore mechanism."""
     backup_path = VECTOR_DIR.parent / f"{VECTOR_DIR.name}.backup"
     temp_path = VECTOR_DIR.parent / f"{VECTOR_DIR.name}.temp"
@@ -65,14 +65,17 @@ async def update_faiss_index_atomic(
             if backup_path.exists():
                 shutil.rmtree(backup_path)
 
+            index_size = store.index.ntotal
             logger.info(
                 "FAISS index updated atomically",
                 extra={
                     "event_id": event_id,
                     "texts_added": len(texts),
-                    "index_size": store.index.ntotal,
+                    "index_size": index_size,
                 },
             )
+            
+            return index_size
 
     except Exception as e:
         logger.error(
@@ -184,7 +187,7 @@ async def handle_book_event(evt: dict):
         )
 
     # Embed and add to FAISS with atomic operations
-    await update_faiss_index_atomic(texts, metadatas, event_id)
+    index_size = await update_faiss_index_atomic(texts, metadatas, event_id)
 
     # Update audit trail in database
     processed_ids = [r["book_id"] for r in rows]
@@ -194,7 +197,7 @@ async def handle_book_event(evt: dict):
         "Book vectors updated",
         extra={
             "added": len(rows),
-            "index_size": store.index.ntotal,
+            "index_size": index_size,
             "event_id": event_id,
         },
     )

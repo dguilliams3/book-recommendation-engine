@@ -132,7 +132,7 @@ class Settings(BaseSettings):
     # batch parameters
     similarity_threshold: float = Field(0.75, validation_alias="SIMILARITY_THRESHOLD")
     half_life_days: int = Field(45, validation_alias="HALF_LIFE_DAYS")
-    graph_refresh_delay_seconds: int = Field(30, validation_alias="GRAPH_REFRESH_DELAY")
+    graph_refresh_delay_seconds: int = Field(300, validation_alias="GRAPH_REFRESH_DELAY")  # 5 minutes instead of 30 seconds
 
     # data file paths -------------------------------------------------------
     catalog_csv_path: Path = Field(

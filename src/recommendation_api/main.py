@@ -886,6 +886,60 @@ async def get_reader_recommendations(
             )
         )
 
+        # Log recommendation history to database for deduplication and analytics
+        # This enables tracking what books were recommended to prevent immediate duplicates
+        try:
+            async with engine.begin() as conn:
+                # Get user UUID from hash_id for foreign key constraint
+                user_result = await conn.execute(
+                    text("SELECT id FROM public_users WHERE hash_id = :user_hash_id"),
+                    {"user_hash_id": user_hash_id}
+                )
+                user_row = user_result.fetchone()
+                if user_row:
+                    user_uuid = user_row.id
+                    
+                    # Insert each recommendation into history
+                    for rec in recs:
+                        await conn.execute(
+                            text("""
+                                INSERT INTO recommendation_history 
+                                (user_id, book_id, request_id, algorithm_used, score, metadata, created_at)
+                                VALUES (:user_id, :book_id, :request_id, :algorithm, :score, :metadata, NOW())
+                            """),
+                            {
+                                "user_id": user_uuid,
+                                "book_id": rec.book_id,
+                                "request_id": request_id,
+                                "algorithm": "reader_semantic_search" if "semantic_search" in meta.get("tools", []) else "reader_traditional",
+                                "score": 1.0,  # Default confidence score
+                                "metadata": json.dumps({
+                                    "query": query,
+                                    "justification": rec.justification,
+                                    "reading_level": rec.reading_level,
+                                    "generation_method": meta.get("tools", [])
+                                })
+                            }
+                        )
+                    logger.info(
+                        "Recommendation history logged",
+                        extra={
+                            "request_id": request_id,
+                            "user_hash_id": user_hash_id,
+                            "recommendations_count": len(recs)
+                        }
+                    )
+        except Exception as e:
+            # Don't fail the recommendation if history logging fails
+            logger.warning(
+                "Failed to log recommendation history",
+                extra={
+                    "request_id": request_id,
+                    "user_hash_id": user_hash_id,
+                    "error": str(e)
+                }
+            )
+
         return ReaderRecommendResponse(
             request_id=request_id,
             user_hash_id=user_hash_id,

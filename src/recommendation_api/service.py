@@ -26,7 +26,7 @@ from collections import Counter
 
 import numpy as np
 from fastapi import HTTPException
-from langchain.callbacks import AsyncCallbackHandler
+from langchain.callbacks.base import AsyncCallbackHandler
 from langchain.schema import BaseMessage, HumanMessage, SystemMessage
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -907,6 +907,49 @@ async def _fetch_user_feedback_scores(user_hash_id: str, conn) -> dict:
     return feedback_scores
 
 
+async def _get_recently_recommended_books(user_hash_id: str, conn, hours: int = 24) -> set:
+    """Get books recommended to user within the last N hours to prevent immediate duplicates.
+    
+    This implements a recommendation cooldown period to improve diversity and avoid
+    showing the same books repeatedly. The cooldown can be configured via the hours parameter.
+    """
+    try:
+        recent_result = await conn.execute(
+            text(
+                """
+                SELECT DISTINCT rh.book_id 
+                FROM recommendation_history rh
+                JOIN public_users pu ON rh.user_id = pu.id
+                WHERE pu.hash_id = :user_hash_id 
+                AND rh.created_at > NOW() - INTERVAL '24 hours'
+                """
+            ),
+            {"user_hash_id": user_hash_id}
+        )
+        
+        recently_recommended = {row.book_id for row in recent_result.fetchall()}
+        logger.debug(
+            "Retrieved recently recommended books",
+            extra={
+                "user_hash_id": user_hash_id,
+                "count": len(recently_recommended),
+                "cooldown_hours": hours
+            }
+        )
+        return recently_recommended
+        
+    except Exception as e:
+        # Don't fail recommendations if recent history lookup fails
+        logger.warning(
+            "Failed to get recently recommended books, proceeding without deduplication",
+            extra={
+                "user_hash_id": user_hash_id,
+                "error": str(e)
+            }
+        )
+        return set()
+
+
 async def _fetch_similar_books(
     uploaded_books: List[dict], user_hash_id: str, conn
 ) -> List[dict]:
@@ -1160,6 +1203,18 @@ async def generate_reader_recommendations(
             # Fetch user's feedback history
             feedback_scores = await _fetch_user_feedback_scores(user_hash_id, conn)
 
+            # Get recently recommended books to avoid immediate duplicates
+            # This implements a cooldown period to improve recommendation diversity
+            recently_recommended = await _get_recently_recommended_books(user_hash_id, conn)
+            logger.info(
+                "Recent recommendation filter applied",
+                extra={
+                    "user_hash_id": user_hash_id,
+                    "recently_recommended_count": len(recently_recommended),
+                    "cooldown_hours": 24  # Current cooldown period
+                }
+            )
+
             # Get semantic candidates using FAISS vector search
             semantic_candidates = await _semantic_book_candidates_reader(
                 uploaded_books, feedback_scores, user_hash_id, k=30
@@ -1172,8 +1227,24 @@ async def generate_reader_recommendations(
                     query, uploaded_books, feedback_scores, user_hash_id, k=15
                 )
             
-            # Combine all candidate book IDs
+            # Combine all candidate book IDs and filter out recently recommended books
             all_candidate_ids = list(set(semantic_candidates + query_candidates))
+            
+            # Apply cooldown filter to prevent immediate duplicates
+            if recently_recommended:
+                original_count = len(all_candidate_ids)
+                all_candidate_ids = [book_id for book_id in all_candidate_ids 
+                                   if book_id not in recently_recommended]
+                filtered_count = original_count - len(all_candidate_ids)
+                if filtered_count > 0:
+                    logger.info(
+                        "Filtered out recently recommended books",
+                        extra={
+                            "user_hash_id": user_hash_id,
+                            "filtered_count": filtered_count,
+                            "remaining_candidates": len(all_candidate_ids)
+                        }
+                    )
             
             # Fetch full book details for candidates
             candidates = []
