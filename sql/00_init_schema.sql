@@ -49,6 +49,39 @@ CREATE TABLE IF NOT EXISTS checkout (
 );
 
 -- ====================================================================
+-- ENRICHMENT TRACKING TABLES
+-- ====================================================================
+
+-- Book metadata enrichment tracking for continuous background processing
+CREATE TABLE IF NOT EXISTS book_metadata_enrichment (
+    book_id TEXT PRIMARY KEY REFERENCES catalog(book_id),
+    publication_year INTEGER,
+    page_count INTEGER,
+    isbn TEXT,
+    enriched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    enrichment_status TEXT DEFAULT 'pending',
+    attempts INTEGER DEFAULT 0,
+    last_attempt TIMESTAMP,
+    error_message TEXT,
+    priority INTEGER DEFAULT 1, -- 1=low, 2=high, 3=critical
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Enrichment requests table for tracking on-demand requests
+CREATE TABLE IF NOT EXISTS enrichment_requests (
+    request_id TEXT PRIMARY KEY,
+    book_id TEXT REFERENCES catalog(book_id),
+    requester TEXT NOT NULL, -- 'user', 'worker', 'background'
+    priority INTEGER DEFAULT 1,
+    reason TEXT,
+    status TEXT DEFAULT 'pending', -- 'pending', 'in_progress', 'completed', 'failed'
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    processed_at TIMESTAMP,
+    error_message TEXT
+);
+
+-- ====================================================================
 -- EMBEDDING AND ML TABLES
 -- ====================================================================
 
@@ -128,6 +161,13 @@ CREATE INDEX IF NOT EXISTS idx_similarity_score ON student_similarity(sim DESC);
 CREATE INDEX IF NOT EXISTS idx_student_vec_hnsw ON student_embeddings USING hnsw (vec vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_book_vec_hnsw ON book_embeddings USING hnsw (vec vector_cosine_ops);
 
+-- Enrichment tracking indexes
+CREATE INDEX IF NOT EXISTS idx_enrichment_status ON book_metadata_enrichment(enrichment_status);
+CREATE INDEX IF NOT EXISTS idx_enrichment_priority ON book_metadata_enrichment(priority);
+CREATE INDEX IF NOT EXISTS idx_enrichment_attempts ON book_metadata_enrichment(attempts);
+CREATE INDEX IF NOT EXISTS idx_requests_status ON enrichment_requests(status);
+CREATE INDEX IF NOT EXISTS idx_requests_priority ON enrichment_requests(priority);
+
 -- ====================================================================
 -- READER MODE TABLES
 -- ====================================================================
@@ -182,12 +222,109 @@ CREATE INDEX IF NOT EXISTS idx_uploaded_books_reading_level ON uploaded_books(re
 CREATE INDEX IF NOT EXISTS idx_uploaded_books_confidence ON uploaded_books(confidence);
 
 -- ====================================================================
+-- ENRICHMENT TRACKING VIEWS AND FUNCTIONS
+-- ====================================================================
+
+-- View for easy querying of books needing enrichment
+CREATE OR REPLACE VIEW books_needing_enrichment AS
+SELECT 
+    c.book_id,
+    c.title,
+    c.author,
+    c.publication_year,
+    c.page_count,
+    c.isbn,
+    bme.enrichment_status,
+    bme.attempts,
+    bme.priority,
+    bme.last_attempt
+FROM catalog c
+LEFT JOIN book_metadata_enrichment bme ON c.book_id = bme.book_id
+WHERE c.publication_year IS NULL 
+   OR c.page_count IS NULL 
+   OR c.isbn IS NULL 
+   OR c.isbn = '';
+
+-- Function to update enrichment status
+CREATE OR REPLACE FUNCTION update_enrichment_status(
+    p_book_id TEXT,
+    p_status TEXT,
+    p_publication_year INTEGER DEFAULT NULL,
+    p_page_count INTEGER DEFAULT NULL,
+    p_isbn TEXT DEFAULT NULL,
+    p_error_message TEXT DEFAULT NULL
+) RETURNS VOID AS $$
+BEGIN
+    UPDATE book_metadata_enrichment 
+    SET 
+        enrichment_status = p_status,
+        publication_year = COALESCE(p_publication_year, publication_year),
+        page_count = COALESCE(p_page_count, page_count),
+        isbn = COALESCE(p_isbn, isbn),
+        attempts = attempts + 1,
+        last_attempt = CURRENT_TIMESTAMP,
+        error_message = p_error_message,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE book_id = p_book_id;
+    
+    -- Also update the catalog table if we have new data
+    IF p_publication_year IS NOT NULL THEN
+        UPDATE catalog SET publication_year = p_publication_year WHERE book_id = p_book_id;
+    END IF;
+    
+    IF p_page_count IS NOT NULL THEN
+        UPDATE catalog SET page_count = p_page_count WHERE book_id = p_book_id;
+    END IF;
+    
+    IF p_isbn IS NOT NULL THEN
+        UPDATE catalog SET isbn = p_isbn WHERE book_id = p_book_id;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to get next batch of books for enrichment
+CREATE OR REPLACE FUNCTION get_enrichment_batch(
+    p_batch_size INTEGER DEFAULT 50,
+    p_priority INTEGER DEFAULT 1
+) RETURNS TABLE(
+    book_id TEXT,
+    title TEXT,
+    author TEXT,
+    current_publication_year INTEGER,
+    current_page_count INTEGER,
+    current_isbn TEXT
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        c.book_id,
+        c.title,
+        c.author,
+        c.publication_year,
+        c.page_count,
+        c.isbn
+    FROM catalog c
+    LEFT JOIN book_metadata_enrichment bme ON c.book_id = bme.book_id
+    WHERE (c.publication_year IS NULL OR c.page_count IS NULL OR c.isbn IS NULL OR c.isbn = '')
+      AND (bme.book_id IS NULL OR bme.enrichment_status IN ('pending', 'failed'))
+      AND (bme.priority IS NULL OR bme.priority <= p_priority)
+    ORDER BY 
+        COALESCE(bme.priority, 1) DESC,
+        COALESCE(bme.attempts, 0) ASC,
+        c.book_id
+    LIMIT p_batch_size;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ====================================================================
 -- COMMENTS FOR MAINTENANCE
 -- ====================================================================
 
 COMMENT ON TABLE students IS 'Core student demographics and academic data';
 COMMENT ON TABLE catalog IS 'Book catalog with metadata and reading difficulty metrics';
 COMMENT ON TABLE checkout IS 'Student book checkout/return history with ratings';
+COMMENT ON TABLE book_metadata_enrichment IS 'Tracks enrichment status and metadata for books';
+COMMENT ON TABLE enrichment_requests IS 'Tracks on-demand enrichment requests from various services';
 COMMENT ON TABLE student_embeddings IS 'ML embeddings for student preference modeling (1536-dim from text-embedding-3-small)';
 COMMENT ON TABLE book_embeddings IS 'ML embeddings for semantic book similarity (1536-dim from text-embedding-3-small)';
 COMMENT ON TABLE student_similarity IS 'Precomputed student similarity matrix for collaborative filtering';
@@ -198,11 +335,8 @@ COMMENT ON TABLE feedback IS 'Reader Mode feedback on recommendations';
 
 COMMENT ON COLUMN catalog.reading_level IS 'Numeric reading level (e.g., 3.5 for mid-3rd grade level)';
 COMMENT ON COLUMN checkout.checkout_id IS 'Unique identifier for tracking individual checkout events';
-COMMENT ON COLUMN student_embeddings.last_event IS 'UUID of last event that updated this embedding';
-COMMENT ON COLUMN book_embeddings.last_event IS 'UUID of last event that updated this embedding';
-COMMENT ON COLUMN student_embeddings.vec IS '1536-dimensional vector from OpenAI text-embedding-3-small';
-COMMENT ON COLUMN book_embeddings.vec IS '1536-dimensional vector from OpenAI text-embedding-3-small';
-COMMENT ON COLUMN uploaded_books.genre IS 'Book genre classified by LLM enrichment';
-COMMENT ON COLUMN uploaded_books.reading_level IS 'Estimated reading level from LLM (grade level as decimal)';
-COMMENT ON COLUMN uploaded_books.confidence IS 'LLM confidence score for enrichment (0-1)';
-COMMENT ON COLUMN uploaded_books.raw_payload IS 'Original upload data with LLM enrichment metadata'; 
+COMMENT ON COLUMN book_metadata_enrichment.priority IS 'Enrichment priority: 1=low (background), 2=high (worker), 3=critical (user)';
+COMMENT ON COLUMN enrichment_requests.requester IS 'Source of enrichment request: user, worker, or background';
+COMMENT ON VIEW books_needing_enrichment IS 'View of books that need metadata enrichment';
+COMMENT ON FUNCTION update_enrichment_status IS 'Updates enrichment status and metadata for a book';
+COMMENT ON FUNCTION get_enrichment_batch IS 'Gets next batch of books for enrichment processing'; 

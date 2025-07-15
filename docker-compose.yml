@@ -307,6 +307,7 @@ services:
         condition: service_healthy
 
   # Enriches catalog entries with external metadata (e.g., Google Books, Open Library) and readability scores.
+  # Enhanced with priority-based processing, retry logic, and comprehensive status tracking.
   book_enrichment_worker:
     build:
       context: .
@@ -319,6 +320,17 @@ services:
       - ./data:/app/data
     environment:
       - OPENAI_API_KEY
+      # Enrichment system configuration
+      - ENRICHMENT_BATCH_SIZE=50
+      - ENRICHMENT_BATCH_INTERVAL=30
+      - ENRICHMENT_MAX_RETRIES_CRITICAL=5
+      - ENRICHMENT_MAX_RETRIES_HIGH=3
+      - ENRICHMENT_MAX_RETRIES_LOW=2
+      - ENRICHMENT_RATE_LIMIT_CRITICAL=0.1
+      - ENRICHMENT_RATE_LIMIT_HIGH=0.2
+      - ENRICHMENT_RATE_LIMIT_LOW=0.5
+      - ENRICHMENT_API_TIMEOUT=10
+      - OPENLIBRARY_BASE_URL=https://openlibrary.org
     depends_on:
       postgres:
         condition: service_healthy

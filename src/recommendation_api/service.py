@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio, json, os, time
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, List, Tuple, Optional
+from typing import Any, List, Tuple, Optional, Dict
 from collections import Counter
 
 import numpy as np
@@ -38,6 +38,7 @@ from pydantic import BaseModel
 
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy import text
+from sqlalchemy.orm import sessionmaker
 
 from common.settings import settings as S
 from common.structured_logging import get_logger
@@ -61,8 +62,97 @@ from common.llm_client import (
     enrich_book_metadata,
     LLMServiceError
 )
+from common.kafka_utils import KafkaProducer
+from common.metrics import MetricsCollector
 
 logger = get_logger(__name__)
+
+# Add enrichment producer
+enrichment_producer = KafkaProducer(
+    bootstrap_servers=S.kafka_bootstrap_servers
+)
+
+def trigger_book_enrichment(book_id: str, priority: int = 3, reason: str = "user_request") -> None:
+    """Trigger on-demand enrichment for a book with priority level.
+    
+    Args:
+        book_id: Book to enrich
+        priority: 1=low (background), 2=high (worker), 3=critical (user)
+        reason: Reason for enrichment request
+    """
+    try:
+        import uuid
+        enrichment_request = {
+            'event_type': 'book_enrichment_requested',
+            'request_id': str(uuid.uuid4()),
+            'book_id': book_id,
+            'priority': priority,
+            'reason': reason,
+            'requester': 'recommendation_api',
+            'timestamp': time.time()
+        }
+        
+        enrichment_producer.send('book_enrichment_requests', enrichment_request)
+        logger.info(f"Triggered enrichment for book {book_id} (priority {priority}, reason: {reason})")
+        
+    except Exception as e:
+        logger.error(f"Failed to trigger enrichment for book {book_id}: {e}")
+
+def get_book_with_enrichment_fallback(book_id: str, priority: int = 3) -> Optional[Dict[str, Any]]:
+    """Get book data, triggering enrichment if critical metadata is missing.
+    
+    Args:
+        book_id: Book to retrieve
+        priority: Priority for enrichment if needed (default: 3=critical)
+    """
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                text("""
+                    SELECT book_id, title, author, isbn, genre, difficulty_band,
+                           reading_level, publication_year, page_count, average_rating
+                    FROM catalog WHERE book_id = :book_id
+                """),
+                {"book_id": book_id}
+            )
+            book = result.fetchone()
+            
+            if not book:
+                return None
+            
+            # Check if we need enrichment
+            needs_enrichment = (
+                book.publication_year is None or
+                book.page_count is None or
+                not book.isbn or book.isbn == ''
+            )
+            
+            if needs_enrichment:
+                # Trigger enrichment with specified priority
+                trigger_book_enrichment(
+                    book_id, 
+                    priority=priority, 
+                    reason='missing_metadata_for_recommendation'
+                )
+                logger.info(f"Book {book_id} needs enrichment, triggered priority {priority} process")
+            
+            return {
+                'book_id': book.book_id,
+                'title': book.title,
+                'author': book.author,
+                'isbn': book.isbn or '',
+                'genre': json.loads(book.genre) if book.genre else [],
+                'difficulty_band': book.difficulty_band,
+                'reading_level': book.reading_level,
+                'publication_year': book.publication_year,
+                'page_count': book.page_count,
+                'average_rating': book.average_rating,
+                'needs_enrichment': needs_enrichment
+            }
+            
+    except Exception as e:
+        logger.error(f"Error getting book {book_id}: {e}")
+        return None
 
 # ---------------------------------------------------------------------------
 # Models

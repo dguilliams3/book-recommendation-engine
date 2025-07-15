@@ -1009,6 +1009,20 @@ def main():
                         - Duration: {metric.get('duration', 'N/A')}ms
                         """
                         )
+                    elif metric.get("event") == "reader_recommendation_served":
+                        st.success(
+                            f"""
+                        **Reader Recommendation Served** ({metric.get('timestamp', 'N/A')})
+                        - User: {metric.get('user_hash_id', 'N/A')[:8]}...
+                        - Duration: {metric.get('duration_sec', 'N/A')}s
+                        - Agent Duration: {metric.get('agent_duration', 'N/A')}s
+                        - Tools Used: {metric.get('tool_count', 'N/A')}
+                        - Recommendations: {metric.get('n', 'N/A')}
+                        - Mode: {metric.get('mode', 'N/A')}
+                        - Cache: {'✅' if metric.get('cache_enabled') else '❌'}
+                        - Optimized: {'✅' if metric.get('performance_optimized') else '❌'}
+                        """
+                        )
                     else:
                         # Show any other metrics
                         st.text(
