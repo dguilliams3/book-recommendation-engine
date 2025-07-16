@@ -63,10 +63,6 @@ from common.llm_client import (
     LLMServiceError
 )
 from common.kafka_utils import publish_event
-from .main import push_metric
-
-# Import engine from main to avoid circular imports
-from .main import engine
 
 logger = get_logger(__name__)
 
