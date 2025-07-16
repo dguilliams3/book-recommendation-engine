@@ -6,19 +6,14 @@ from langchain_community.vectorstores import FAISS
 from aiokafka import AIOKafkaConsumer
 import asyncpg
 from common.settings import settings as S
-from common.kafka_utils import KafkaEventConsumer, publish_event, KafkaProducer
+from common.kafka_utils import KafkaEventConsumer, publish_event
 from common.events import BOOK_EVENTS_TOPIC, BookAddedEvent, BookUpdatedEvent
 from common.structured_logging import get_logger
 import time
 
-# Add enrichment producer
-enrichment_producer = KafkaProducer(
-    bootstrap_servers=S.kafka_bootstrap_servers
-)
-
 logger = get_logger(__name__)
 
-def trigger_book_enrichment(book_id: str, priority: int = 2, reason: str = "embedding_generation") -> None:
+async def trigger_book_enrichment(book_id: str, priority: int = 2, reason: str = "embedding_generation") -> None:
     """Trigger on-demand enrichment for a book when missing metadata is needed for embeddings.
     
     Args:
@@ -38,7 +33,7 @@ def trigger_book_enrichment(book_id: str, priority: int = 2, reason: str = "embe
             'timestamp': time.time()
         }
         
-        enrichment_producer.send('book_enrichment_requests', enrichment_request)
+        await publish_event('book_enrichment_requests', enrichment_request)
         logger.info(f"Triggered enrichment for book {book_id} (priority {priority}, reason: {reason})")
         
     except Exception as e:
@@ -226,7 +221,7 @@ async def handle_book_event(evt: dict):
         )
         
         if needs_enrichment:
-            trigger_book_enrichment(book_id)
+            await trigger_book_enrichment(book_id)
         
         # Parse genre JSON array stored as text – fallback to empty list on error
         try:

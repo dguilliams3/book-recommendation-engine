@@ -62,17 +62,11 @@ from common.llm_client import (
     enrich_book_metadata,
     LLMServiceError
 )
-from common.kafka_utils import KafkaProducer
-from common.metrics import MetricsCollector
+from common.kafka_utils import publish_event
 
 logger = get_logger(__name__)
 
-# Add enrichment producer
-enrichment_producer = KafkaProducer(
-    bootstrap_servers=S.kafka_bootstrap_servers
-)
-
-def trigger_book_enrichment(book_id: str, priority: int = 3, reason: str = "user_request") -> None:
+async def trigger_book_enrichment(book_id: str, priority: int = 3, reason: str = "user_request") -> None:
     """Trigger on-demand enrichment for a book with priority level.
     
     Args:
@@ -92,13 +86,13 @@ def trigger_book_enrichment(book_id: str, priority: int = 3, reason: str = "user
             'timestamp': time.time()
         }
         
-        enrichment_producer.send('book_enrichment_requests', enrichment_request)
+        await publish_event('book_enrichment_requests', enrichment_request)
         logger.info(f"Triggered enrichment for book {book_id} (priority {priority}, reason: {reason})")
         
     except Exception as e:
         logger.error(f"Failed to trigger enrichment for book {book_id}: {e}")
 
-def get_book_with_enrichment_fallback(book_id: str, priority: int = 3) -> Optional[Dict[str, Any]]:
+async def get_book_with_enrichment_fallback(book_id: str, priority: int = 3) -> Optional[Dict[str, Any]]:
     """Get book data, triggering enrichment if critical metadata is missing.
     
     Args:
@@ -129,7 +123,7 @@ def get_book_with_enrichment_fallback(book_id: str, priority: int = 3) -> Option
             
             if needs_enrichment:
                 # Trigger enrichment with specified priority
-                trigger_book_enrichment(
+                await trigger_book_enrichment(
                     book_id, 
                     priority=priority, 
                     reason='missing_metadata_for_recommendation'
