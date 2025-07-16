@@ -1,5 +1,5 @@
 from typing import List, Optional
-from datetime import date
+from datetime import date, datetime
 from pydantic import BaseModel, Field, conint, field_validator, ConfigDict
 from sqlalchemy import (
     Column,
@@ -246,7 +246,7 @@ class _RecordModel(BaseModel):
 
 class BookCatalogItem(_RecordModel):
     book_id: str
-    isbn: str
+    isbn: Optional[str] = None
     title: str
     author: Optional[str] = None
     genre: list[str] = Field(default_factory=list)
@@ -326,3 +326,25 @@ class CheckoutRecord(_RecordModel):
     @classmethod
     def _default_checkout_id(cls, v):
         return v or str(uuid.uuid4())
+
+    @field_validator("checkout_date", "return_date", mode="before")
+    @classmethod
+    def _coerce_date(cls, v):
+        if v in (None, "", "null", "N/A"):
+            return None
+        if isinstance(v, date):
+            return v
+        if isinstance(v, str):
+            try:
+                # Try ISO format first
+                return date.fromisoformat(v)
+            except Exception:
+                try:
+                    # Try parsing as datetime, then convert to date
+                    return datetime.fromisoformat(v).date()
+                except Exception:
+                    # Log and raise for visibility
+                    import logging
+                    logging.warning(f"Invalid date format for checkout/return date: {v}")
+                    raise ValueError(f"Invalid date format: {v}")
+        raise ValueError(f"Unrecognized date value: {v}")

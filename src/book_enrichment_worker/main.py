@@ -34,6 +34,7 @@ from common.models import Base
 from common.settings import settings
 from common.structured_logging import get_logger
 from common.kafka_utils import publish_event
+from common.events import BOOK_EVENTS_TOPIC, BookAddedEvent
 
 # Setup
 logger = get_logger(__name__)
@@ -175,31 +176,89 @@ class PriorityEnrichmentManager:
         self.last_call_times[priority] = time.time()
     
     async def fetch_work_details(self, work_key: str) -> Optional[Dict[str, Any]]:
-        """Fetch detailed work information from OpenLibrary API."""
+        """Fetch detailed work information from OpenLibrary API or local cache."""
+        # Check for local cache first
+        # Handle double OL prefix: /works/OLOL17453W -> OL17453W.json
+        cache_key = work_key
+        if work_key.startswith("/works/OLOL"):
+            # Extract the OL17453W part from /works/OLOL17453W
+            cache_key = work_key.replace("/works/OLOL", "OL")
+        elif work_key.startswith("OLOL"):
+            cache_key = work_key[2:]  # Remove first "OL" prefix
+        
+        local_path = Path("data/raw_openlibrary/works") / (cache_key + ".json")
+        if local_path.exists():
+            try:
+                with open(local_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    logger.info(f"Loaded work data from local cache: {work_key}")
+                    return data
+            except Exception as e:
+                logger.warning(f"Failed to load local cache for {work_key}: {e}")
+        
+        # Fallback to API call
+        url = f"https://openlibrary.org{work_key}.json"
         try:
-            url = f"{ENRICHMENT_CONFIG['openlibrary_base_url']}{work_key}.json"
             async with self.session.get(url) as response:
                 if response.status == 200:
-                    return await response.json()
+                    data = await response.json()
+                    # Save to local cache for future use
+                    try:
+                        local_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(local_path, 'w', encoding='utf-8') as f:
+                            json.dump(data, f, ensure_ascii=False, indent=2)
+                        logger.info(f"Saved work data to local cache: {work_key}")
+                    except Exception as e:
+                        logger.warning(f"Failed to save local cache for {work_key}: {e}")
+                    return data
                 else:
                     logger.warning(f"OpenLibrary API returned status {response.status} for {work_key}")
                     return None
         except Exception as e:
-            logger.warning(f"Failed to fetch work details for {work_key}: {e}")
+            logger.error(f"Failed to fetch work data for {work_key}: {e}")
             return None
-    
+
     async def fetch_edition_details(self, edition_key: str) -> Optional[Dict[str, Any]]:
-        """Fetch detailed edition information from OpenLibrary API."""
+        """Fetch detailed edition information from OpenLibrary API or local cache."""
+        # Check for local cache first
+        # Handle double OL prefix: /works/OLOL17453W -> OL17453W.json
+        cache_key = edition_key
+        if edition_key.startswith("/works/OLOL"):
+            # Extract the OL17453W part from /works/OLOL17453W
+            cache_key = edition_key.replace("/works/OLOL", "OL")
+        elif edition_key.startswith("OLOL"):
+            cache_key = edition_key[2:]  # Remove first "OL" prefix
+        
+        local_path = Path("data/raw_openlibrary/works") / (cache_key + ".json")
+        if local_path.exists():
+            try:
+                with open(local_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    logger.info(f"Loaded edition data from local cache: {edition_key}")
+                    return data
+            except Exception as e:
+                logger.warning(f"Failed to load local cache for {edition_key}: {e}")
+        
+        # Fallback to API call
+        url = f"https://openlibrary.org{edition_key}.json"
         try:
-            url = f"{ENRICHMENT_CONFIG['openlibrary_base_url']}{edition_key}.json"
             async with self.session.get(url) as response:
                 if response.status == 200:
-                    return await response.json()
+                    data = await response.json()
+                    # Save to local cache for future use
+                    try:
+                        local_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(local_path, 'w', encoding='utf-8') as f:
+                            json.dump(data, f, ensure_ascii=False, indent=2)
+                        logger.info(f"Saved edition data to local cache: {edition_key}")
+                    except Exception as e:
+                        logger.warning(f"Failed to save local cache for {edition_key}: {e}")
+                    return data
                 else:
                     logger.warning(f"OpenLibrary API returned status {response.status} for {edition_key}")
                     return None
         except Exception as e:
-            logger.warning(f"Failed to fetch edition details for {edition_key}: {e}")
+            logger.error(f"Failed to fetch edition data for {edition_key}: {e}")
             return None
     
     def extract_publication_year(self, work_data: Dict[str, Any], edition_data: Optional[Dict[str, Any]] = None) -> Optional[int]:
@@ -474,6 +533,13 @@ class PriorityEnrichmentManager:
                     'timestamp': time.time()
                 }
                 await publish_event('book_events', completion_event)
+                # Emit BookAddedEvent for re-embedding
+                book_added_event = BookAddedEvent(
+                    count=1,
+                    book_ids=[book_id],
+                    source="enrichment_worker"
+                )
+                await publish_event(BOOK_EVENTS_TOPIC, book_added_event.model_dump())
             except Exception as e:
                 logger.error(f"Error sending completion event for {book_id}: {e}")
         

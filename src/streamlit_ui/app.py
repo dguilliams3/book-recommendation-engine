@@ -20,6 +20,14 @@ from common.settings import settings as S
 from common.redis_utils import get_redis_client
 from common.structured_logging import get_logger
 
+# Page configuration for better performance
+st.set_page_config(
+    page_title="Let's Find You a Book!",
+    page_icon="📚",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
 logger = get_logger(__name__)
 
 # UI Configuration
@@ -362,9 +370,10 @@ def parse_csv_books(csv_content: str) -> List[Dict[str, Any]]:
 # ====================================================================
 
 
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def get_all_student_ids():
     try:
-        engine = create_engine(str(S.db_url).replace("+asyncpg", ""))
+        engine = get_engine()
         logger.debug(f"Connecting to DB: {engine.url}")
         with engine.connect() as conn:
             rows = conn.execute(text("SELECT student_id FROM students")).fetchall()
@@ -518,10 +527,11 @@ def get_recommendation(student_id: str, interests: str, n: int = 3):
             return {"error": f"API request failed: {str(e)}"}
 
 
+@st.cache_data(ttl=60)  # Cache for 1 minute
 def get_table_df(table_name):
     try:
         # Use the same DB URL as the rest of the app
-        engine = create_engine(str(S.db_url).replace("+asyncpg", ""))
+        engine = get_engine()
         with engine.connect() as conn:
             df = pd.read_sql(f"SELECT * FROM {table_name} LIMIT 100", conn)
         return df
@@ -530,11 +540,12 @@ def get_table_df(table_name):
         return pd.DataFrame({"error": [str(e)]})
 
 
+@st.cache_data(ttl=60)  # Cache for 1 minute
 def get_table_data(table_name):
     """Get table data with UUID serialization fix for Streamlit"""
     try:
         # Use the same DB URL as the rest of the app
-        engine = create_engine(str(S.db_url).replace("+asyncpg", ""))
+        engine = get_engine()
         with engine.connect() as conn:
             df = pd.read_sql(f"SELECT * FROM {table_name} LIMIT 100", conn)
             
@@ -552,8 +563,25 @@ def get_table_data(table_name):
         return pd.DataFrame({"error": [str(e)]})
 
 
+# Add a singleton DB engine for connection reuse and faster loads
+# Database engine singleton (compatible with Streamlit >=1.18 and <1.18)
+if hasattr(st, "cache_resource"):
+    # Streamlit 1.18+
+    @st.cache_resource
+    def get_engine():
+        """Singleton SQLAlchemy engine (Streamlit >=1.18)."""
+        return create_engine(str(S.db_url).replace("+asyncpg", ""))
+else:
+    # Older Streamlit versions
+    @st.experimental_singleton
+    def get_engine():
+        """Singleton SQLAlchemy engine (Streamlit <1.18)."""
+        return create_engine(str(S.db_url).replace("+asyncpg", ""))
+
+
 def main():
     logger.info("Starting Streamlit UI")
+    
     st.title("📚 Elementary School Book Recommender")
 
     # Create tabs for different sections
@@ -610,7 +638,8 @@ def main():
 
                 if submitted:
                     # Only load student IDs when form is submitted
-                    student_ids = get_all_student_ids()
+                    with st.spinner("Loading student data..."):
+                        student_ids = get_all_student_ids()
                     
                     if not student_ids:
                         st.warning(
@@ -1046,7 +1075,7 @@ def main():
         
         # Get all available tables
         try:
-            engine = create_engine(str(S.db_url).replace("+asyncpg", ""))
+            engine = get_engine()
             with engine.connect() as conn:
                 # Get list of all tables
                 result = conn.execute(text("""
@@ -1076,6 +1105,7 @@ def main():
             
             # Get table schema
             try:
+                engine = get_engine()
                 with engine.connect() as conn:
                     schema_result = conn.execute(text(f"""
                         SELECT column_name, data_type, is_nullable, column_default
@@ -1194,50 +1224,24 @@ def main():
                     .reset_index(drop=True)
                 )
 
-    # ---------------------------------------------------------------------
-    # Footer - Developer Attribution and Contact Information
-    # ---------------------------------------------------------------------
-    
-    st.markdown("---")
-    
-    # Create a subtle footer with developer info
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown(
-            """
-            <div style="text-align: center; color: #666; font-size: 0.85em; padding: 8px 0;">
-                Built with ❤️ by <a href="https://danguilliams.com" target="_blank" style="color: #0066cc; text-decoration: none;">Dan Guilliams</a>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-    
-    with col2:
-        st.markdown(
-            """
-            <div style="text-align: center; color: #666; font-size: 0.85em; padding: 8px 0;">
-                <a href="https://github.com/dguilliams3/book-recommendation-engine" target="_blank" style="color: #0066cc; text-decoration: none;">📚 GitHub</a>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-    
-    with col3:
-        st.markdown(
-            """
-            <div style="text-align: center; color: #666; font-size: 0.85em; padding: 8px 0;">
-                <a href="https://buymeacoffee.com/danguilliams" target="_blank" style="color: #0066cc; text-decoration: none;">☕ Buy me a coffee</a>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-    
-    # Add a subtle help text
+    # Add a subtle help text at the bottom
     st.markdown(
         """
         <div style="text-align: center; color: #888; font-size: 0.75em; margin-top: 5px;">
             Found bugs? Have suggestions? Feel free to reach out!
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    
+    # Render footer in the placeholder (appears early in DOM but at natural position)
+    st.markdown(
+        """
+        ---
+        <div style="text-align: center; color: #666; font-size: 0.85em; padding: 8px 0;">
+            Built with ❤️ by <a href="https://danguilliams.com" target="_blank" style="color: #0066cc; text-decoration: none;">Dan Guilliams</a> | 
+            <a href="https://github.com/dguilliams3/book-recommendation-engine" target="_blank" style="color: #0066cc; text-decoration: none;">🐙 GitHub</a> | 
+            <a href="https://buymeacoffee.com/danguilliams" target="_blank" style="color: #0066cc; text-decoration: none;">☕ Buy me a coffee</a>
         </div>
         """,
         unsafe_allow_html=True

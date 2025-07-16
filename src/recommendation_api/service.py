@@ -853,7 +853,7 @@ async def generate_recommendations(
                     candidates, student_id, query
                 )
 
-                prompt_messages = build_prompt(
+                prompt_messages = build_student_prompt(
                     student_id=student_id,
                     query=query,
                     candidates=scored_candidates,

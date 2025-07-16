@@ -235,7 +235,12 @@ def process_openlibrary_dump(input_file: str, output_file: str, max_books: int =
                         continue
                     
                     # Generate book ID
-                    book_id = f"OL{book_data.get('key', '').replace('/works/', '')}"
+                    # Extract the work ID from the OpenLibrary key (e.g., /works/OL17453W -> OL17453W)
+                    work_key = book_data.get('key', '')
+                    if work_key.startswith('/works/'):
+                        book_id = work_key.replace('/works/', '')
+                    else:
+                        book_id = work_key
                     
                     # Write to CSV
                     writer.writerow({

@@ -1,0 +1,21 @@
+[server]
+# Reduce memory usage
+maxUploadSize = 1
+enableXsrfProtection = false
+enableCORS = false
+
+[browser]
+# Faster loading
+gatherUsageStats = false
+
+[client]
+# Reduce network requests
+showErrorDetails = false
+
+[runner]
+# Optimize for performance
+magicEnabled = false
+
+[theme]
+# Dark theme
+base = "dark" 

@@ -10,6 +10,7 @@ import asyncio, csv, json, sys, time, uuid, hashlib
 from pathlib import Path
 from typing import Iterable, Dict, List, Optional, Tuple
 from dataclasses import dataclass
+from datetime import date
 
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
@@ -107,7 +108,7 @@ async def check_existing_student(session: AsyncSession, student_id: str, content
     return True, existing_hash  # Student exists but content has changed
 
 
-async def check_existing_checkout(session: AsyncSession, student_id: str, book_id: str, checkout_date: str, content_hash: str) -> Tuple[bool, Optional[str]]:
+async def check_existing_checkout(session: AsyncSession, student_id: str, book_id: str, checkout_date: date, content_hash: str) -> Tuple[bool, Optional[str]]:
     """Check if checkout exists and if content has changed"""
     result = await session.execute(
         text("SELECT checkout_id, content_hash FROM checkout WHERE student_id = :student_id AND book_id = :book_id AND checkout_date = :checkout_date"),
@@ -455,7 +456,7 @@ async def run_ingestion():
                 content_hash = compute_content_hash(checkout_content)
                 
                 # Check if checkout exists and if content has changed
-                exists, existing_hash = await check_existing_checkout(sess, chk.student_id, chk.book_id, str(chk.checkout_date), content_hash)
+                exists, existing_hash = await check_existing_checkout(sess, chk.student_id, chk.book_id, chk.checkout_date, content_hash)
                 
                 if exists and existing_hash == content_hash:
                     # Checkout exists and content is identical - skip processing

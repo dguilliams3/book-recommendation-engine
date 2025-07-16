@@ -10,6 +10,9 @@ from common.kafka_utils import KafkaEventConsumer, publish_event
 from common.events import BOOK_EVENTS_TOPIC, BookAddedEvent, BookUpdatedEvent
 from common.structured_logging import get_logger
 import time
+import threading
+from fastapi import FastAPI, Request, HTTPException
+import uvicorn
 
 logger = get_logger(__name__)
 
@@ -191,7 +194,7 @@ async def handle_book_event(evt: dict):
     conn = await asyncpg.connect(pg_url)
     rows = await conn.fetch(
         """SELECT book_id,title,author,genre,difficulty_band,reading_level,publication_year,description,isbn,page_count
-           FROM books WHERE book_id = ANY($1::text[])""",
+           FROM catalog WHERE book_id = ANY($1::text[])""",
         ids,
     )
     await conn.close()
@@ -295,8 +298,139 @@ async def handle_book_event(evt: dict):
         },
     )
 
+async def validate_and_sync_faiss_index():
+    """Validate FAISS index and rebuild if needed from Postgres data.
+    
+    Handles fresh starts (no book_embeddings table) and ensures consistency
+    between Postgres catalog and FAISS index.
+    """
+    logger.info("Starting FAISS index validation and synchronization...")
+    
+    pg_url = str(S.db_url).replace("postgresql+asyncpg://", "postgresql://")
+    conn = await asyncpg.connect(pg_url)
+    
+    try:
+        # Check if book_embeddings table exists
+        table_exists = await conn.fetchval(
+            """SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'book_embeddings'
+            )"""
+        )
+        
+        if not table_exists:
+            logger.info("book_embeddings table does not exist - this is a fresh start")
+            # For fresh start, we'll let the Kafka events handle embedding generation
+            # Just ensure we have a clean FAISS index
+            if VECTOR_DIR.exists():
+                shutil.rmtree(VECTOR_DIR)
+                logger.info("Removed existing FAISS index for fresh start")
+            return
+        
+        # Get count of books with embeddings
+        embedding_count = await conn.fetchval("SELECT COUNT(*) FROM book_embeddings")
+        logger.info(f"Found {embedding_count} books with embeddings in database")
+        
+        # Check if FAISS index exists and get its size
+        faiss_exists = VECTOR_DIR.exists() and (VECTOR_DIR / "index.faiss").exists()
+        
+        if faiss_exists:
+            try:
+                store = await ensure_store()
+                faiss_count = store.index.ntotal
+                logger.info(f"FAISS index exists with {faiss_count} embeddings")
+                
+                # Compare counts
+                if faiss_count != embedding_count:
+                    logger.warning(
+                        f"FAISS index count ({faiss_count}) doesn't match database count ({embedding_count}) - rebuilding"
+                    )
+                    await full_faiss_rebuild()
+                else:
+                    logger.info("FAISS index is consistent with database")
+            except Exception as e:
+                logger.error(f"Error reading FAISS index: {e} - rebuilding")
+                await full_faiss_rebuild()
+        else:
+            logger.info("FAISS index doesn't exist - rebuilding from database")
+            await full_faiss_rebuild()
+            
+    except Exception as e:
+        logger.error(f"Error during FAISS validation: {e}")
+        # Don't fail startup - let Kafka events handle embedding generation
+    finally:
+        await conn.close()
+
+REBUILD_TOKEN = os.getenv("REBUILD_TOKEN", "changeme")
+
+app = FastAPI()
+
+@app.post("/rebuild")
+async def rebuild_index(request: Request):
+    token = request.headers.get("x-rebuild-token")
+    if token != REBUILD_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        await full_faiss_rebuild()
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"FAISS rebuild failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def full_faiss_rebuild():
+    """Rebuild the FAISS index from all books in the catalog."""
+    logger.info("Starting full FAISS index rebuild...")
+    from langchain_openai import OpenAIEmbeddings
+    from langchain_community.vectorstores import FAISS
+    import asyncpg
+    from filelock import FileLock
+    # Fetch all books
+    pg_url = str(S.db_url).replace("postgresql+asyncpg://", "postgresql://")
+    conn = await asyncpg.connect(pg_url)
+    rows = await conn.fetch(
+        """SELECT book_id,title,author,genre,difficulty_band,reading_level,publication_year,description,isbn,page_count FROM catalog"""
+    )
+    await conn.close()
+    if not rows:
+        logger.warning("No books found for FAISS rebuild")
+        return
+    texts = []
+    metadatas = []
+    for r in rows:
+        try:
+            genre_list = json.loads(r["genre"]) if r["genre"] else []
+        except Exception:
+            genre_list = []
+        genres_str = ", ".join(genre_list)
+        desc = r["description"] or ""
+        text = (
+            f"{r['title']} by {r['author']}. "
+            f"Genre: {genres_str}. "
+            f"Reading level: {r['reading_level']} ({r['difficulty_band']}). "
+            f"Published {r['publication_year']}. "
+            f"{desc}"
+        )
+        texts.append(text)
+        metadatas.append({
+            "book_id": r["book_id"],
+            "genre": genres_str,
+            "level": r["reading_level"],
+        })
+    with FileLock(str(LOCK_FILE)):
+        embeddings = OpenAIEmbeddings(api_key=S.openai_api_key, model=S.embedding_model)
+        store = FAISS.from_texts(texts, embeddings, metadatas=metadatas)
+        store.save_local(VECTOR_DIR)
+    logger.info(f"FAISS index rebuilt with {len(texts)} books.")
+
+def run_fastapi():
+    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="info")
 
 async def main():
+    # Validate and sync FAISS index on startup
+    await validate_and_sync_faiss_index()
+    
+    # Start FastAPI in a background thread
+    threading.Thread(target=run_fastapi, daemon=True).start()
     consumer = KafkaEventConsumer(BOOK_EVENTS_TOPIC, "book_vector_worker")
     await consumer.start(handle_book_event)
 

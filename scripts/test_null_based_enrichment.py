@@ -32,7 +32,7 @@ def test_null_based_approach():
     print("\n=== Database Schema ===")
     print("""
     -- Main books table with NULL for missing data
-    CREATE TABLE books (
+    CREATE TABLE catalog (
         book_id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
         author TEXT,
@@ -58,7 +58,7 @@ def test_null_based_approach():
     print("\n=== Query Examples ===")
     print("""
     -- Find books needing enrichment
-    SELECT book_id FROM books 
+    SELECT book_id FROM catalog 
     WHERE publication_year IS NULL
        OR page_count IS NULL
        OR isbn IS NULL OR isbn = '';
@@ -67,7 +67,7 @@ def test_null_based_approach():
     SELECT b.book_id, 
            b.publication_year,
            e.publication_year_enriched
-    FROM books b
+    FROM catalog b
     LEFT JOIN book_metadata_enrichment e ON b.book_id = e.book_id
     WHERE b.publication_year IS NULL 
       AND (e.publication_year_enriched IS NULL OR NOT e.publication_year_enriched);
