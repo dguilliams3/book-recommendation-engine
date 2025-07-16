@@ -8,5 +8,6 @@ faiss-cpu
 filelock
 prometheus-client
 asyncpg>=0.29.0
+sqlalchemy>=2.0.0
 fastapi
 uvicorn 
