@@ -235,6 +235,10 @@ async def run_ingestion():
                 # Remove original reading_level to avoid duplicate kwarg
                 row_clean = row.copy()
                 row_clean.pop("reading_level", None)
+                
+                # Fix for ISBN validation: Convert None values to empty strings
+                # This prevents Pydantic validation errors for Optional[str] fields
+                row_clean = {k: (v if v is not None else "") for k, v in row_clean.items()}
 
                 item = models.BookCatalogItem(**row_clean, reading_level=rl)
                 
