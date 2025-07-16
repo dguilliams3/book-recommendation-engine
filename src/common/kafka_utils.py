@@ -190,3 +190,25 @@ async def publish_event(topic: str, event: dict) -> bool:
         logger.error(
             "Unexpected error publishing event", exc_info=True, extra={"topic": topic}
         )
+
+
+# Synchronous Kafka producer wrapper for services that need sync operations
+class KafkaProducer:
+    """Synchronous wrapper around the async KafkaEventProducer."""
+    
+    def __init__(self, bootstrap_servers: str):
+        self.bootstrap_servers = bootstrap_servers
+        
+    def send(self, topic: str, value: dict, **kwargs):
+        """Send a message to a topic synchronously."""
+        try:
+            # Simple approach: use asyncio.run for sync calls
+            asyncio.run(publish_event(topic, value))
+            logger.debug(f"Sent message to {topic}")
+        except Exception as e:
+            logger.error(f"Failed to send message to {topic}: {e}")
+            
+    def close(self):
+        """Close the producer."""
+        # The async producer handles its own lifecycle
+        pass
