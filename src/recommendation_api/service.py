@@ -18,8 +18,8 @@ Performance Optimizations:
 
 from __future__ import annotations
 
-import asyncio, json, os, time
-from datetime import timedelta
+import asyncio, json, os, time, re
+from datetime import timedelta, datetime
 from pathlib import Path
 from typing import Any, List, Tuple, Optional, Dict
 from collections import Counter
@@ -63,90 +63,201 @@ from common.llm_client import (
     LLMServiceError
 )
 from common.kafka_utils import publish_event
+from .main import push_metric
+
+# Import engine from main to avoid circular imports
+from .main import engine
 
 logger = get_logger(__name__)
 
-async def trigger_book_enrichment(book_id: str, priority: int = 3, reason: str = "user_request") -> None:
-    """Trigger on-demand enrichment for a book with priority level.
-    
-    Args:
-        book_id: Book to enrich
-        priority: 1=low (background), 2=high (worker), 3=critical (user)
-        reason: Reason for enrichment request
-    """
-    try:
-        import uuid
-        enrichment_request = {
-            'event_type': 'book_enrichment_requested',
-            'request_id': str(uuid.uuid4()),
-            'book_id': book_id,
-            'priority': priority,
-            'reason': reason,
-            'requester': 'recommendation_api',
-            'timestamp': time.time()
-        }
-        
-        await publish_event('book_enrichment_requests', enrichment_request)
-        logger.info(f"Triggered enrichment for book {book_id} (priority {priority}, reason: {reason})")
-        
-    except Exception as e:
-        logger.error(f"Failed to trigger enrichment for book {book_id}: {e}")
 
-async def get_book_with_enrichment_fallback(book_id: str, priority: int = 3) -> Optional[Dict[str, Any]]:
-    """Get book data, triggering enrichment if critical metadata is missing.
+def _normalize_text(text: str) -> str:
+    """Normalize text for comparison by removing punctuation and converting to lowercase."""
+    if not text:
+        return ""
+    # Remove punctuation and convert to lowercase
+    normalized = re.sub(r'[^\w\s]', '', text.lower())
+    # Remove extra whitespace
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    return normalized
+
+
+def _calculate_title_similarity(title1: str, title2: str) -> float:
+    """Calculate similarity between two book titles using normalized comparison."""
+    if not title1 or not title2:
+        return 0.0
+    
+    norm1 = _normalize_text(title1)
+    norm2 = _normalize_text(title2)
+    
+    if norm1 == norm2:
+        return 1.0
+    
+    # Check if one title is contained within the other
+    if norm1 in norm2 or norm2 in norm1:
+        return 0.9
+    
+    # Simple word overlap similarity
+    words1 = set(norm1.split())
+    words2 = set(norm2.split())
+    
+    if not words1 or not words2:
+        return 0.0
+    
+    intersection = words1.intersection(words2)
+    union = words1.union(words2)
+    
+    return len(intersection) / len(union) if union else 0.0
+
+
+def _calculate_author_similarity(author1: str, author2: str) -> float:
+    """Calculate similarity between two author names."""
+    if not author1 or not author2:
+        return 0.0
+    
+    norm1 = _normalize_text(author1)
+    norm2 = _normalize_text(author2)
+    
+    if norm1 == norm2:
+        return 1.0
+    
+    # Check for exact match after normalization
+    if norm1 == norm2:
+        return 1.0
+    
+    # Check if one author name is contained within the other
+    if norm1 in norm2 or norm2 in norm1:
+        return 0.8
+    
+    # Simple word overlap for author names
+    words1 = set(norm1.split())
+    words2 = set(norm2.split())
+    
+    if not words1 or not words2:
+        return 0.0
+    
+    intersection = words1.intersection(words2)
+    union = words1.union(words2)
+    
+    return len(intersection) / len(union) if union else 0.0
+
+
+async def _filter_out_user_books(
+    candidates: List[dict], 
+    uploaded_books: List[dict], 
+    user_hash_id: str
+) -> List[dict]:
+    """
+    Filter out books that user has already uploaded.
+    
+    This function implements comprehensive filtering to prevent recommending
+    books that the user has already read/uploaded. It uses multiple criteria:
+    
+    1. Exact book_id matches
+    2. Exact title/author matches
+    3. Fuzzy title similarity (high confidence)
+    4. ISBN matches
+    5. Author similarity (high confidence)
     
     Args:
-        book_id: Book to retrieve
-        priority: Priority for enrichment if needed (default: 3=critical)
+        candidates: List of candidate books to filter
+        uploaded_books: List of books uploaded by the user
+        user_hash_id: User identifier for logging
+        
+    Returns:
+        Filtered list of candidates with uploaded books removed
     """
-    try:
-        with engine.connect() as conn:
-            result = conn.execute(
-                text("""
-                    SELECT book_id, title, author, isbn, genre, difficulty_band,
-                           reading_level, publication_year, page_count, average_rating
-                    FROM catalog WHERE book_id = :book_id
-                """),
-                {"book_id": book_id}
+    if not uploaded_books or not candidates:
+        return candidates
+    
+    # Create lookup sets for efficient filtering
+    uploaded_book_ids = {book.get("book_id") for book in uploaded_books if book.get("book_id")}
+    uploaded_isbns = {book.get("isbn") for book in uploaded_books if book.get("isbn")}
+    uploaded_titles_authors = {
+        (_normalize_text(book.get("title", "")), _normalize_text(book.get("author", "")))
+        for book in uploaded_books
+        if book.get("title") and book.get("author")
+    }
+    
+    # Create normalized title/author pairs for uploaded books
+    uploaded_titles = [_normalize_text(book.get("title", "")) for book in uploaded_books if book.get("title")]
+    uploaded_authors = [_normalize_text(book.get("author", "")) for book in uploaded_books if book.get("author")]
+    
+    filtered_candidates = []
+    filtered_count = 0
+    
+    for candidate in candidates:
+        should_filter = False
+        filter_reason = None
+        
+        # 1. Check exact book_id match
+        if candidate.get("book_id") in uploaded_book_ids:
+            should_filter = True
+            filter_reason = "exact_book_id_match"
+        
+        # 2. Check exact ISBN match
+        elif candidate.get("isbn") and candidate.get("isbn") in uploaded_isbns:
+            should_filter = True
+            filter_reason = "exact_isbn_match"
+        
+        # 3. Check exact title/author match
+        elif (candidate.get("title") and candidate.get("author")):
+            candidate_title = _normalize_text(candidate.get("title", ""))
+            candidate_author = _normalize_text(candidate.get("author", ""))
+            
+            if (candidate_title, candidate_author) in uploaded_titles_authors:
+                should_filter = True
+                filter_reason = "exact_title_author_match"
+            
+            # 4. Check fuzzy title similarity (high confidence)
+            elif candidate_title in uploaded_titles:
+                should_filter = True
+                filter_reason = "exact_title_match"
+            else:
+                # Check for high similarity titles
+                for uploaded_title in uploaded_titles:
+                    if _calculate_title_similarity(candidate_title, uploaded_title) > 0.8:
+                        should_filter = True
+                        filter_reason = "fuzzy_title_match"
+                        break
+                
+                # 5. Check author similarity (high confidence)
+                if not should_filter and candidate_author:
+                    for uploaded_author in uploaded_authors:
+                        if _calculate_author_similarity(candidate_author, uploaded_author) > 0.8:
+                            should_filter = True
+                            filter_reason = "fuzzy_author_match"
+                            break
+        
+        if should_filter:
+            filtered_count += 1
+            logger.debug(
+                "Filtered out candidate book",
+                extra={
+                    "user_hash_id": user_hash_id,
+                    "candidate_book_id": candidate.get("book_id"),
+                    "candidate_title": candidate.get("title"),
+                    "candidate_author": candidate.get("author"),
+                    "filter_reason": filter_reason
+                }
             )
-            book = result.fetchone()
-            
-            if not book:
-                return None
-            
-            # Check if we need enrichment
-            needs_enrichment = (
-                book.publication_year is None or
-                book.page_count is None or
-                not book.isbn or book.isbn == ''
-            )
-            
-            if needs_enrichment:
-                # Trigger enrichment with specified priority
-                await trigger_book_enrichment(
-                    book_id, 
-                    priority=priority, 
-                    reason='missing_metadata_for_recommendation'
-                )
-                logger.info(f"Book {book_id} needs enrichment, triggered priority {priority} process")
-            
-            return {
-                'book_id': book.book_id,
-                'title': book.title,
-                'author': book.author,
-                'isbn': book.isbn or '',
-                'genre': json.loads(book.genre) if book.genre else [],
-                'difficulty_band': book.difficulty_band,
-                'reading_level': book.reading_level,
-                'publication_year': book.publication_year,
-                'page_count': book.page_count,
-                'average_rating': book.average_rating,
-                'needs_enrichment': needs_enrichment
+        else:
+            filtered_candidates.append(candidate)
+    
+    if filtered_count > 0:
+        logger.info(
+            "Filtered out user's uploaded books",
+            extra={
+                "user_hash_id": user_hash_id,
+                "original_candidates": len(candidates),
+                "filtered_candidates": len(filtered_candidates),
+                "filtered_count": filtered_count,
+                "uploaded_books_count": len(uploaded_books)
             }
-            
-    except Exception as e:
-        logger.error(f"Error getting book {book_id}: {e}")
-        return None
+        )
+    
+    return filtered_candidates
+
 
 # ---------------------------------------------------------------------------
 # Models
@@ -1330,7 +1441,7 @@ async def generate_reader_recommendations(
                         }
                     )
             
-            # Fetch full book details for candidates
+            # Fetch full book details for candidates first
             candidates = []
             if all_candidate_ids:
                 # Secure parameterized query construction
@@ -1352,6 +1463,35 @@ async def generate_reader_recommendations(
                         """
                     ),
                     {"book_ids": all_candidate_ids}
+                )
+                
+                for row in candidate_result.fetchall():
+                    book = {
+                        "book_id": row.book_id,
+                        "title": row.title,
+                        "author": row.author,
+                        "genre": row.genre,
+                        "reading_level": row.reading_level or 5.0,
+                        "librarian_blurb": row.librarian_blurb,
+                        "isbn": row.isbn,
+                        "average_rating": row.average_rating,
+                    }
+                    candidates.append(book)
+            
+            # Now filter out user's uploaded books from the full candidate list
+            original_candidate_count = len(candidates)
+            candidates = await _filter_out_user_books(candidates, uploaded_books, user_hash_id)
+            filtered_count = original_candidate_count - len(candidates)
+            
+            if filtered_count > 0:
+                logger.info(
+                    "Applied user book filtering",
+                    extra={
+                        "user_hash_id": user_hash_id,
+                        "original_candidates": original_candidate_count,
+                        "filtered_candidates": len(candidates),
+                        "filtered_count": filtered_count
+                    }
                 )
                 
                 for row in candidate_result.fetchall():

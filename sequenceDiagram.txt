@@ -1,0 +1,90 @@
+sequenceDiagram
+    participant User as User/Teacher
+    participant UI as Streamlit/React UI
+    participant API as Recommendation API
+    participant Cache as Redis Cache
+    participant DB as PostgreSQL
+    participant Kafka as Event Bus
+    participant ML as ML Pipeline
+    participant AI as OpenAI
+    
+    Note over User,AI: Book Recommendation Flow
+    
+    User->>UI: Request recommendations for Student X
+    UI->>API: GET /recommendations/{student_id}
+    
+    API->>Cache: Check cached recommendations
+    alt Cache Hit
+        Cache-->>API: Return cached results
+        API-->>UI: Recommendations (sub-second)
+    else Cache Miss
+        API->>DB: Query student profile & history
+        DB-->>API: Student data
+        
+        API->>DB: Query book catalog & vectors
+        DB-->>API: Book candidates
+        
+        API->>AI: Generate recommendation reasoning
+        AI-->>API: Personalized explanations
+        
+        API->>Cache: Store recommendations
+        API-->>UI: Fresh recommendations (~2-3s)
+    end
+    
+    UI-->>User: Display recommendations
+    
+    Note over User,AI: User Feedback Processing
+    
+    User->>UI: Thumbs up/down on recommendation
+    UI->>API: POST /feedback
+    API->>Kafka: Publish FeedbackEvent
+    API-->>UI: Acknowledgment
+    
+    Kafka->>ML: FeedbackEvent consumed
+    ML->>DB: Update user preferences
+    ML->>Cache: Invalidate affected recommendations
+    
+    Note over User,AI: Real-time Learning Pipeline
+    
+    Kafka->>ML: Student checkout event
+    ML->>DB: Update reading profile
+    ML->>AI: Generate new embedding
+    AI-->>ML: 1536-dim vector
+    ML->>DB: Store student embedding
+    ML->>Kafka: Publish embedding change
+    
+    Kafka->>ML: Embedding change event
+    ML->>DB: Recalculate similarity matrix
+    ML->>Cache: Invalidate related recommendations
+    
+    Note over User,AI: Book Upload (Reader Mode)
+    
+    User->>UI: Upload personal book list
+    UI->>API: POST /user/books (CSV/JSON)
+    API->>DB: Store user books
+    API->>Kafka: Publish book added events
+    API-->>UI: Upload confirmation
+    
+    Kafka->>ML: Book added events
+    ML->>AI: Generate book embeddings
+    AI-->>ML: Book vectors
+    ML->>DB: Update vector index
+    
+    Note over User,AI: Background Processing
+    
+    rect rgb(240, 248, 255)
+        Note over Kafka,AI: Continuous Enhancement
+        loop Every few minutes
+            ML->>DB: Check books needing enrichment
+            ML->>AI: Enhance metadata (pages, reading level)
+            AI-->>ML: Enhanced metadata
+            ML->>DB: Update book catalog
+        end
+        
+        loop Nightly (2 AM)
+            ML->>DB: Rebuild similarity matrices
+            ML->>AI: Batch embedding generation
+            AI-->>ML: Updated embeddings
+            ML->>DB: Refresh recommendation graphs
+        end
+    end

@@ -221,6 +221,12 @@ CREATE INDEX IF NOT EXISTS idx_uploaded_books_genre ON uploaded_books(genre);
 CREATE INDEX IF NOT EXISTS idx_uploaded_books_reading_level ON uploaded_books(reading_level);
 CREATE INDEX IF NOT EXISTS idx_uploaded_books_confidence ON uploaded_books(confidence);
 
+-- Enhanced filtering indexes for deduplication
+CREATE INDEX IF NOT EXISTS idx_uploaded_books_title_author ON uploaded_books(title, author);
+CREATE INDEX IF NOT EXISTS idx_uploaded_books_isbn ON uploaded_books(isbn);
+CREATE INDEX IF NOT EXISTS idx_uploaded_books_title_lower ON uploaded_books(LOWER(title));
+CREATE INDEX IF NOT EXISTS idx_uploaded_books_author_lower ON uploaded_books(LOWER(author));
+
 -- ====================================================================
 -- ENRICHMENT TRACKING VIEWS AND FUNCTIONS
 -- ====================================================================

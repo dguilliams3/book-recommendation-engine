@@ -1,0 +1,116 @@
+graph TB
+    subgraph "User Interfaces"
+        SUI[Streamlit UI<br/>Teacher/Librarian Dashboard]
+        RUI[React UI<br/>Modern Web Interface]
+        MCP[MCP Tools<br/>Programmatic Access]
+    end
+    
+    subgraph "API Gateway"
+        RAPI[Recommendation API<br/>FastAPI + MCP Integration<br/>Rate Limiting & Auth]
+    end
+    
+    subgraph "Data Processing Layer"
+        IS[Ingestion Service<br/>CSV + OpenLibrary Processing]
+        UIS[User Ingest Service<br/>Reader Mode Uploads]
+        BEW[Book Enrichment Worker<br/>LLM Metadata Enhancement]
+    end
+    
+    subgraph "Real-time ML Pipeline"
+        SPW[Student Profile Worker<br/>Reading Behavior Analytics]
+        SEW[Student Embedding Worker<br/>Vector Generation]
+        BVW[Book Vector Worker<br/>Content Embeddings]
+        SW[Similarity Worker<br/>Collaborative Filtering]
+        FW[Feedback Worker<br/>Real-time Learning]
+    end
+    
+    subgraph "System Services"
+        GR[Graph Refresher<br/>Nightly Similarity Updates]
+        LC[Log Consumer<br/>Centralized Logging]
+        MC[Metrics Consumer<br/>Monitoring & Analytics]
+    end
+    
+    subgraph "Data Layer"
+        PG[(PostgreSQL + pgvector<br/>Relational + Vector Data)]
+        FAISS[(FAISS Index<br/>Vector Similarity Search)]
+        REDIS[(Redis<br/>Caching + Sessions)]
+        KAFKA[(Apache Kafka<br/>Event Streaming)]
+    end
+    
+    subgraph "External Services"
+        OPENAI[OpenAI<br/>GPT-4o + Embeddings]
+        OLIB[OpenLibrary<br/>Book Metadata API]
+    end
+    
+    %% User Interface Connections
+    SUI --> RAPI
+    RUI --> RAPI
+    MCP --> RAPI
+    
+    %% API Gateway Connections
+    RAPI --> PG
+    RAPI --> REDIS
+    RAPI --> KAFKA
+    RAPI --> FAISS
+    RAPI --> OPENAI
+    
+    %% Data Processing Connections
+    IS --> PG
+    IS --> KAFKA
+    IS --> FAISS
+    IS --> OLIB
+    UIS --> PG
+    UIS --> KAFKA
+    UIS --> OPENAI
+    BEW --> PG
+    BEW --> KAFKA
+    BEW --> OPENAI
+    BEW --> OLIB
+    
+    %% ML Pipeline Connections
+    SPW --> KAFKA
+    SPW --> PG
+    SEW --> KAFKA
+    SEW --> PG
+    SEW --> OPENAI
+    BVW --> KAFKA
+    BVW --> FAISS
+    BVW --> PG
+    BVW --> OPENAI
+    SW --> KAFKA
+    SW --> PG
+    FW --> KAFKA
+    FW --> PG
+    FW --> REDIS
+    
+    %% System Services Connections
+    GR --> PG
+    GR --> KAFKA
+    GR --> OPENAI
+    LC --> KAFKA
+    MC --> KAFKA
+    MC --> REDIS
+    
+    %% Event Flow Arrows (Key Data Flows)
+    KAFKA -.->|"Book Events"| BVW
+    KAFKA -.->|"Student Events"| SPW
+    KAFKA -.->|"Profile Changes"| SEW
+    KAFKA -.->|"Embedding Changes"| SW
+    KAFKA -.->|"Feedback Events"| FW
+    KAFKA -.->|"System Logs"| LC
+    KAFKA -.->|"Metrics Events"| MC
+    
+    classDef ui fill:#e1f5fe
+    classDef api fill:#f3e5f5
+    classDef processing fill:#fff3e0
+    classDef ml fill:#e8f5e8
+    classDef system fill:#fce4ec
+    classDef data fill:#f1f8e9
+    classDef external fill:#fff8e1
+    
+    class SUI,RUI,MCP ui
+    class RAPI api
+    class IS,UIS,BEW processing
+    class SPW,SEW,BVW,SW,FW ml
+    class GR,LC,MC system
+    class PG,FAISS,REDIS,KAFKA data
+    class OPENAI,OLIB external
