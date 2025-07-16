@@ -1,8 +1,47 @@
 """
-Feedback Worker - Kafka Consumer
+Feedback Worker - Real-time Learning Pipeline
 
-Consumes feedback events and updates database and Redis cache.
-Handles feedback scoring and recommendation adjustment.
+SERVICE PURPOSE:
+    Kafka consumer that processes user feedback events (thumbs up/down) to
+    continuously improve recommendation quality through real-time learning.
+    Critical component for adaptive recommendation system behavior.
+
+KEY FUNCTIONS:
+    - Consumes feedback events from Kafka FEEDBACK_EVENTS_TOPIC
+    - Updates PostgreSQL feedback table with user ratings
+    - Invalidates Redis recommendation cache for real-time updates
+    - Triggers recommendation recalculation for affected users
+    - Tracks feedback metrics for recommendation quality analysis
+
+FEEDBACK PROCESSING:
+    - Positive feedback: Boosts similar book recommendations
+    - Negative feedback: Reduces weight of similar recommendations
+    - Cache invalidation: Ensures immediate recommendation updates
+    - User profile updates: Adjusts preference vectors based on feedback
+
+DEPENDENCIES:
+    - Kafka: Consumes from FEEDBACK_EVENTS_TOPIC
+    - PostgreSQL: Updates Feedback and PublicUser tables
+    - Redis: Cache invalidation for recommendation updates
+    - Async Architecture: Non-blocking event processing
+
+INTERACTION PATTERNS:
+    INPUT:  FeedbackEvent (user_hash_id, book_id, rating, timestamp)
+    OUTPUT: Database updates + cache invalidation
+    EVENTS: Pure consumer - processes feedback for learning
+
+SCALING CONSIDERATIONS:
+    - Async processing for high-throughput feedback handling
+    - Redis operations are atomic for cache consistency
+    - Database updates use async sessions for performance
+    - Error handling ensures feedback is not lost
+
+CRITICAL NOTES:
+    - Feedback processing directly impacts recommendation quality
+    - Cache invalidation ensures users see updated recommendations immediately
+    - Database failures are logged but don't block other feedback processing
+
+⚠️  REMEMBER: Update this documentation block when modifying service functionality!
 """
 
 import asyncio

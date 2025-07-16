@@ -1,3 +1,41 @@
+"""
+Log Consumer Service - Centralized Logging Infrastructure
+
+SERVICE PURPOSE:
+    Kafka consumer that aggregates structured logs from all microservices
+    into centralized JSONL files for monitoring, debugging, and analytics.
+    Essential for production observability and troubleshooting.
+
+KEY FUNCTIONS:
+    - Consumes log messages from Kafka 'service_logs' topic
+    - Writes structured JSON logs to logs/service_logs.jsonl
+    - Provides centralized log aggregation for distributed system
+    - Enables correlation of events across multiple services
+
+DEPENDENCIES:
+    - Kafka: Consumes from 'service_logs' topic
+    - File System: Writes to logs/ directory
+    - All Services: Receives logs from every microservice
+
+INTERACTION PATTERNS:
+    INPUT:  Structured log events from all system components
+    OUTPUT: Centralized JSONL log files for analysis
+    EVENTS: Pure consumer - no event publishing
+
+OPERATIONAL NOTES:
+    - Critical for production monitoring and debugging
+    - Log files can grow large - implement rotation in production
+    - Failure here doesn't break core functionality but impacts observability
+    - Should have dedicated monitoring to ensure log collection continuity
+
+MONITORING:
+    - Monitor log file growth and rotation
+    - Track consumer lag to ensure real-time log processing
+    - Alert on consumer failures to maintain observability
+
+⚠️  REMEMBER: Update this documentation block when modifying service functionality!
+"""
+
 import asyncio, json
 from pathlib import Path
 

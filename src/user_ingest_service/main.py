@@ -103,8 +103,8 @@ def hash_user_identifier(identifier: str) -> str:
 
 def validate_csv_content(content: str) -> List[Dict[str, Any]]:
     """Validate and parse CSV content"""
-    if len(content.encode("utf-8")) > 1024 * 1024:  # 1MB limit
-        raise HTTPException(status_code=413, detail="File too large (max 1MB)")
+    if len(content.encode("utf-8")) > 100 * 1024:  # 100KB limit
+        raise HTTPException(status_code=413, detail="File too large (max 100KB)")
 
     reader = csv.DictReader(io.StringIO(content))
     rows = list(reader)
@@ -122,6 +122,15 @@ def validate_csv_content(content: str) -> List[Dict[str, Any]]:
             status_code=400,
             detail=f"Missing required columns: {required_columns - set(reader.fieldnames or [])}",
         )
+
+    # Enforce field length limits for each row
+    for i, row in enumerate(rows):
+        if len(row.get("title", "")) > 500:
+            raise HTTPException(status_code=400, detail=f"Row {i+1}: Title too long (max 500 chars)")
+        if row.get("author") and len(row["author"]) > 200:
+            raise HTTPException(status_code=400, detail=f"Row {i+1}: Author too long (max 200 chars)")
+        if row.get("notes") and len(row["notes"]) > 1000:
+            raise HTTPException(status_code=400, detail=f"Row {i+1}: Notes too long (max 1000 chars)")
 
     return rows
 
@@ -229,6 +238,9 @@ async def upload_books_json(request: BooksUploadRequest):
         # Convert books to dict format
         books_data = [book.model_dump() for book in request.books]
 
+        if len(request.books) > 20:
+            raise HTTPException(status_code=400, detail="You can only upload up to 20 books at a time.")
+
         # Store books with enrichment
         upload_id = str(uuid.uuid4())
         book_ids = await store_books(user_id, books_data, upload_id)
@@ -263,6 +275,8 @@ async def upload_books_csv(
 
         # Read and validate content
         content = await file.read()
+        if len(content) > 100 * 1024:
+            raise HTTPException(status_code=413, detail="File too large (max 100KB)")
         try:
             content_str = content.decode("utf-8")
         except UnicodeDecodeError:

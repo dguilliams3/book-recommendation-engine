@@ -1,3 +1,49 @@
+"""
+Student Profile Worker - Reading Behavior Analytics
+
+SERVICE PURPOSE:
+    Incremental worker that builds and maintains student reading profiles based
+    on checkout history. Creates difficulty-band histograms that feed into
+    student embedding generation for personalized recommendations.
+
+KEY FUNCTIONS:
+    - Listens to checkout events via Kafka to track reading behavior
+    - Aggregates checkout history into difficulty-band histograms
+    - Builds profiles showing reading level preferences and patterns
+    - Updates student_profile_cache table with computed profiles
+    - Publishes profile change events to trigger embedding updates
+
+PROFILE COMPUTATION:
+    - Analyzes book difficulty levels from checkout history
+    - Creates histograms: {"early_elementary": 3, "late_elementary": 1}
+    - Tracks reading level progression and preferences
+    - Identifies genre preferences and reading patterns
+
+DEPENDENCIES:
+    - Kafka: Consumes from CHECKOUT_EVENTS_TOPIC
+    - PostgreSQL: Reads checkouts table, writes student_profile_cache
+    - Book Metadata: Requires difficulty_band from book enrichment
+    - Student Embedding Worker: Downstream consumer of profile data
+
+INTERACTION PATTERNS:
+    INPUT:  Checkout events (student_id, book_id, checkout date)
+    OUTPUT: Student profile histograms and change events
+    EVENTS: StudentProfileChangedEvent → student embedding worker
+
+ANALYTICS CAPABILITIES:
+    - Reading level preference analysis
+    - Genre and topic preference tracking
+    - Reading progression monitoring
+    - Collaborative filtering data preparation
+
+CRITICAL NOTES:
+    - Profiles are foundation for personalized recommendations
+    - Quality depends on book metadata enrichment
+    - Profile changes trigger full recommendation pipeline updates
+
+⚠️  REMEMBER: Update this documentation block when modifying service functionality!
+"""
+
 import asyncio, json, uuid
 from collections import Counter
 

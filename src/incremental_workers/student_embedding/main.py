@@ -1,3 +1,42 @@
+"""
+Student Embedding Worker - Real-time ML Pipeline Component
+
+SERVICE PURPOSE:
+    Incremental worker that generates vector embeddings for student reading profiles.
+    Part of the real-time ML pipeline that enables personalized book recommendations
+    through semantic understanding of student preferences.
+
+KEY FUNCTIONS:
+    - Listens to student profile change events via Kafka
+    - Computes 1536-dimensional OpenAI embeddings from reading histograms
+    - Implements change detection using profile hashing for efficiency
+    - Updates PostgreSQL with new embeddings for similarity calculations
+    - Publishes embedding change events for downstream services
+
+DEPENDENCIES:
+    - Kafka: Consumes from STUDENT_PROFILE_TOPIC
+    - PostgreSQL: Reads student_profile_cache, writes student_embeddings
+    - OpenAI: text-embedding-3-small model for vector generation
+    - Downstream: Triggers similarity matrix recalculation
+
+INTERACTION PATTERNS:
+    INPUT:  Student profile histograms (reading preference data)
+    OUTPUT: Vector embeddings for semantic similarity matching
+    EVENTS: StudentEmbeddingChangedEvent → similarity workers
+
+SCALING CONSIDERATIONS:
+    - Can run multiple instances with Kafka partition distribution
+    - Embedding generation is I/O bound (OpenAI API calls)
+    - Uses hashing to avoid redundant computations
+
+CRITICAL NOTES:
+    - Embeddings are core to recommendation quality
+    - Profile changes trigger real-time recommendation updates
+    - Failure here impacts all personalized recommendations
+
+⚠️  REMEMBER: Update this documentation block when modifying service functionality!
+"""
+
 import asyncio, json
 import os
 import uuid

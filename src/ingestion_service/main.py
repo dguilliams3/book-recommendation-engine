@@ -1,7 +1,44 @@
 """
-1. Ensure schema exists (executes 00_init_schema.sql once).
-2. Validate & coerce CSV rows → Pydantic models.
-3. Upsert rows into Postgres and build / update FAISS embeddings.
+Ingestion Service - Data Processing Pipeline
+
+SERVICE PURPOSE:
+    Comprehensive data ingestion pipeline that processes CSV files and OpenLibrary
+    data into the recommendation system. Handles schema initialization, data
+    validation, database operations, and vector index management.
+
+KEY FUNCTIONS:
+    - Schema initialization (executes 00_init_schema.sql once)
+    - CSV data validation and coercion using Pydantic models
+    - PostgreSQL upsert operations for books, students, checkout history
+    - FAISS vector index building and updates for semantic search
+    - OpenLibrary integration for external book metadata
+    - Event publishing for real-time pipeline triggers
+
+SUPPORTED DATA SOURCES:
+    - catalog_sample.csv: Book catalog with metadata
+    - students_sample.csv: Student profiles and reading levels
+    - checkouts_sample.csv: Historical checkout data
+    - OpenLibrary API: External book metadata enrichment
+
+DEPENDENCIES:
+    - PostgreSQL: Primary data storage with vector extensions
+    - FAISS: Vector similarity search index
+    - OpenAI: Text embeddings for semantic search
+    - Kafka: Event publishing for downstream services
+    - File System: CSV file processing
+
+INTERACTION PATTERNS:
+    INPUT:  CSV files and OpenLibrary data
+    OUTPUT: Populated database + updated vector indexes
+    EVENTS: BookAddedEvent, StudentAddedEvent, CheckoutAddedEvent
+
+OPERATIONAL NOTES:
+    - Designed for batch processing of large datasets
+    - Idempotent operations for safe re-processing
+    - Comprehensive error handling and logging
+    - Critical for system bootstrap and data updates
+
+⚠️  REMEMBER: Update this documentation block when modifying service functionality!
 """
 
 import asyncio, sys, time

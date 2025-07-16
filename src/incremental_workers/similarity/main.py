@@ -1,3 +1,48 @@
+"""
+Similarity Worker - Collaborative Filtering Engine
+
+SERVICE PURPOSE:
+    Incremental worker that computes student-to-student similarity matrices
+    using vector embeddings. Core component of collaborative filtering that
+    enables "students like you" recommendations.
+
+KEY FUNCTIONS:
+    - Listens to student embedding change events via Kafka
+    - Computes cosine similarity between student embedding vectors
+    - Uses PostgreSQL pgvector for efficient similarity calculations
+    - Maintains top-15 most similar students for each student
+    - Updates student_similarity table for real-time recommendations
+
+SIMILARITY ALGORITHM:
+    - Uses pgvector's <=> operator for cosine distance calculations
+    - Finds 15 nearest neighbors for each student embedding
+    - Filters by similarity threshold for quality control
+    - Stores bidirectional similarity relationships
+
+DEPENDENCIES:
+    - Kafka: Consumes from STUDENT_EMBEDDING_TOPIC
+    - PostgreSQL: Reads student_embeddings, writes student_similarity
+    - pgvector: Vector similarity operations
+    - Upstream: Student embedding worker
+
+INTERACTION PATTERNS:
+    INPUT:  Student embedding change events
+    OUTPUT: Updated similarity matrix for collaborative filtering
+    EVENTS: Triggered by StudentEmbeddingChangedEvent
+
+PERFORMANCE NOTES:
+    - Uses pgvector for hardware-optimized similarity search
+    - Incremental updates avoid full matrix recalculation
+    - Similarity calculations are CPU-intensive but batched efficiently
+
+CRITICAL NOTES:
+    - Similarity quality directly impacts collaborative recommendations
+    - Performance scales with number of students (O(n²) worst case)
+    - Essential for "find similar students" functionality
+
+⚠️  REMEMBER: Update this documentation block when modifying service functionality!
+"""
+
 import asyncio
 import uuid
 import asyncpg

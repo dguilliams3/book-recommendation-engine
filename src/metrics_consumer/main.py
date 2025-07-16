@@ -1,3 +1,51 @@
+"""
+Metrics Consumer - System Monitoring and Analytics
+
+SERVICE PURPOSE:
+    Kafka consumer that aggregates system metrics from all services for
+    monitoring, alerting, and performance analysis. Essential for production
+    observability and system health tracking.
+
+KEY FUNCTIONS:
+    - Consumes metrics events from Kafka 'ingestion_metrics' topic
+    - Stores metrics in Redis for real-time dashboard queries
+    - Processes job completion metrics, performance counters, and system health
+    - Enables Prometheus-style metrics collection and aggregation
+    - Supports distributed system monitoring and alerting
+
+METRICS PROCESSING:
+    - Job execution metrics (duration, success/failure rates)
+    - System performance counters (request latency, throughput)
+    - Error rates and exception tracking
+    - Resource utilization patterns
+    - User interaction analytics
+
+DEPENDENCIES:
+    - Kafka: Consumes from 'ingestion_metrics' topic
+    - Redis: Metrics storage and caching for dashboards
+    - All Services: Receives metrics from entire system
+
+INTERACTION PATTERNS:
+    INPUT:  Metrics events from all system components
+    OUTPUT: Aggregated metrics in Redis for monitoring dashboards
+    EVENTS: Pure consumer - no event publishing
+
+MONITORING CAPABILITIES:
+    - Real-time system health monitoring
+    - Performance trend analysis
+    - Error rate tracking and alerting
+    - Resource utilization monitoring
+    - User behavior analytics
+
+OPERATIONAL NOTES:
+    - Critical for production system monitoring
+    - Redis provides fast access for dashboard queries
+    - Graceful degradation if Redis is unavailable
+    - High-throughput processing for metrics volume
+
+⚠️  REMEMBER: Update this documentation block when modifying service functionality!
+"""
+
 import asyncio, json
 from common.kafka_utils import KafkaEventConsumer
 from common.settings import settings as S

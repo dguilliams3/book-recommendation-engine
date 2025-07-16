@@ -1,3 +1,51 @@
+"""
+Book Vector Worker - Content-Based Recommendation Engine
+
+SERVICE PURPOSE:
+    Incremental worker that generates and maintains vector embeddings for books
+    to enable semantic content-based recommendations. Central component for
+    "books like this one" functionality and semantic search capabilities.
+
+KEY FUNCTIONS:
+    - Listens to book addition/update events via Kafka
+    - Generates OpenAI text embeddings from book metadata (title, author, description)
+    - Maintains FAISS vector index for high-speed similarity search
+    - Triggers book enrichment when metadata is insufficient for embeddings
+    - Provides FastAPI endpoints for vector operations
+    - Handles concurrent access with file locking
+
+VECTOR OPERATIONS:
+    - Embedding generation from book metadata concatenation
+    - FAISS index updates with thread-safe file operations
+    - Vector similarity search for content-based recommendations
+    - Index persistence and recovery mechanisms
+
+DEPENDENCIES:
+    - Kafka: Consumes from BOOK_EVENTS_TOPIC
+    - OpenAI: text-embedding-3-small for vector generation
+    - FAISS: Vector similarity index storage
+    - Book Enrichment Worker: Triggers when metadata missing
+    - File System: Vector index persistence
+
+INTERACTION PATTERNS:
+    INPUT:  Book metadata change events
+    OUTPUT: Updated FAISS vector index for semantic search
+    EVENTS: BookAddedEvent, BookUpdatedEvent consumption
+
+PERFORMANCE CONSIDERATIONS:
+    - File locking prevents corruption during concurrent updates
+    - FAISS provides sub-millisecond similarity queries
+    - Incremental updates avoid full index rebuilds
+    - Thread-safe operations for production stability
+
+CRITICAL NOTES:
+    - Vector quality depends on book metadata richness
+    - Essential for semantic "find similar books" features
+    - Index corruption would break content-based recommendations
+
+⚠️  REMEMBER: Update this documentation block when modifying service functionality!
+"""
+
 import asyncio, json, os, uuid, shutil, hashlib
 from pathlib import Path
 from filelock import FileLock

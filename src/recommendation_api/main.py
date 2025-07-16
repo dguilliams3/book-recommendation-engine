@@ -1,3 +1,56 @@
+"""
+Recommendation API - Core FastAPI Service
+
+SERVICE PURPOSE:
+    Central recommendation engine providing personalized book suggestions through
+    advanced AI/ML algorithms. Serves as the primary API gateway for the entire
+    book recommendation system with production-grade features.
+
+KEY FUNCTIONS:
+    - FastAPI REST endpoints for book recommendations with rate limiting
+    - Multi-factor recommendation scoring (reading level + semantic + social signals)
+    - MCP (Model Context Protocol) tool integration with 7 specialized tools
+    - LangChain + LangGraph AI agent orchestration for complex queries
+    - Real-time feedback processing and recommendation adjustment
+    - Reader Mode API for user-specific recommendations
+    - Prometheus metrics export for monitoring
+
+CORE RECOMMENDATION ALGORITHMS:
+    1. Content-Based: Vector similarity using OpenAI embeddings
+    2. Collaborative Filtering: Student behavior clustering and similarity
+    3. Hybrid Scoring: Weighted combination of multiple signals
+    4. Reading Level Matching: Academic appropriateness filtering
+    5. Social Signals: Peer influence and popularity factors
+
+DEPENDENCIES:
+    - PostgreSQL: Book catalog, student profiles, checkout history
+    - OpenAI: GPT-4o for reasoning, embeddings for similarity
+    - Redis: Caching and session management
+    - Kafka: Event publishing for feedback and metrics
+    - FAISS: High-speed vector similarity search
+
+INTERACTION PATTERNS:
+    INPUT:  Student ID, preferences, reading level, query parameters
+    OUTPUT: Ranked list of personalized book recommendations
+    EVENTS: FeedbackEvent publishing for learning pipeline
+
+MCP TOOLS AVAILABLE:
+    - search_catalog: Semantic search across book collection
+    - get_student_reading_level: Academic profiling with confidence
+    - find_similar_students: Collaborative filtering queries
+    - enrich_book_metadata: Multi-source metadata enrichment
+    - query_checkout_history: Temporal pattern analysis
+    - get_book_recommendations_for_group: Classroom recommendations
+
+SCALING CONSIDERATIONS:
+    - Horizontal scaling via load balancing
+    - Redis caching for sub-second response times
+    - Rate limiting to prevent abuse
+    - Async processing for high concurrency
+
+⚠️  REMEMBER: Update this documentation block when modifying service functionality!
+"""
+
 import asyncio, json, os, uuid, time, sys
 from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import JSONResponse

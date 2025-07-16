@@ -1,3 +1,48 @@
+"""
+Streamlit UI - Teacher/Librarian Dashboard
+
+SERVICE PURPOSE:
+    Comprehensive Streamlit-based web interface for educators and librarians
+    to interact with the book recommendation system. Provides both traditional
+    recommendation features and new Reader Mode for user-uploaded book lists.
+
+KEY FEATURES:
+    - Student recommendation interface with reading level matching
+    - Reader Mode for user-uploaded personal book collections
+    - Real-time recommendation generation and feedback collection
+    - CSV data upload and management for librarians
+    - System health monitoring and metrics visualization
+    - Database exploration and analytics tools
+
+READER MODE CAPABILITIES:
+    - User book list upload (CSV/manual entry)
+    - Privacy-preserving user identification via hashing
+    - Personalized recommendations from user's own collection
+    - Thumbs up/down feedback for recommendation learning
+    - Recommendation history and preference tracking
+
+TRADITIONAL MODE FEATURES:
+    - Student ID-based recommendations from school catalog
+    - Reading level and preference filtering
+    - Group recommendation generation for classrooms
+    - Checkout history analysis and insights
+
+DEPENDENCIES:
+    - Recommendation API: Core recommendation engine
+    - User Ingest Service: Reader Mode book uploads
+    - PostgreSQL: Data queries and analytics
+    - Redis: Session management and caching
+    - Kafka: Real-time metrics and system monitoring
+
+USER EXPERIENCE:
+    - Responsive design optimized for tablets and desktops
+    - Real-time feedback with loading indicators
+    - Error handling with graceful degradation
+    - Session persistence for user preferences
+
+⚠️  REMEMBER: Update this documentation block when modifying service functionality!
+"""
+
 import asyncio
 import csv
 import hashlib
