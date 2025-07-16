@@ -12,11 +12,13 @@
 A **sophisticated microservices architecture** delivering personalized book recommendations to elementary students through AI-powered semantic matching, collaborative filtering, and real-time preference learning. Built for production scalability with enterprise-grade monitoring, event-driven processing, and advanced ML pipelines.
 
 ### 🏆 Key Achievements
-- **8+ Microservices** orchestrated via Docker Compose with health monitoring
-- **Real-time ML Pipeline** processing student interactions via Kafka event streams  
+- **12+ Microservices** orchestrated via Docker Compose with full observability
+- **Reader Mode** for personal book collections with privacy-preserving user management
+- **OpenLibrary Integration** providing access to millions of books with automated enrichment
+- **Real-time ML Pipeline** processing user interactions via Kafka event streams  
 - **Vector Similarity Search** using FAISS + OpenAI embeddings for semantic matching
-- **MCP Tool Integration** providing 7+ specialized tools for librarian workflows
-- **Production Monitoring** with structured logging, metrics dashboards, and alerting
+- **MCP Tool Integration** providing 7+ specialized tools for educational workflows, easy to enhanve with additional tools
+- **Production Monitoring** with Prometheus metrics, structured logging, and health checks
 - **Sub-second Response Times** through Redis caching and incremental processing
 
 ---
