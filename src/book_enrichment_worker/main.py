@@ -1,505 +1,671 @@
+#!/usr/bin/env python3
 """
-Book‑level enrichment cascade.
-Per manifest: Google Books (2 rpm) ➜ Open Library (4 rpm) ➜ readability fallback.
+Book Enrichment Worker
+
+Enhanced asynchronous book data enrichment with priority escalation and retry logic.
+Runs as a background service with priority-based processing:
+- Priority 1 (Low): Background batch processing every 30 seconds  
+- Priority 2 (High): Worker requests processed within 30 seconds
+- Priority 3 (Critical): User requests processed within 5 seconds
+
+Features:
+- Priority queue system with database persistence
+- Exponential backoff retry logic
+- Rate limiting by priority level
+- Comprehensive status tracking
+- Backward compatibility with existing messages
 """
-import asyncio, aiohttp, asyncpg, time, sys, os, json
+
+import asyncio
+import json
+import logging
+import time
+import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Dict, Any, Optional, List, Tuple
+import aiohttp
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
+import os
+from aiokafka import AIOKafkaConsumer
 
-# Add src to Python path so we can find the common module when run directly
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from common import SettingsInstance as S
+from common.models import Base
+from common.settings import settings
 from common.structured_logging import get_logger
-from recommendation_api.tools import readability_formula_estimator
-from common.events import BookUpdatedEvent, BOOK_EVENTS_TOPIC
 from common.kafka_utils import publish_event
-from openai import AsyncOpenAI
 
+# Setup
 logger = get_logger(__name__)
 
-GB_PER_MIN = 2
-OL_PER_MIN = 4
+# Database setup
+engine = create_engine(settings.db_url)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# ---------------------------------------------------------------------------
-# LLM Configuration
-# ---------------------------------------------------------------------------
+# Configuration
+ENRICHMENT_CONFIG = {
+    'batch_size': int(os.getenv('ENRICHMENT_BATCH_SIZE', '50')),
+    'batch_interval': int(os.getenv('ENRICHMENT_BATCH_INTERVAL', '30')),
+    'max_retries': {
+        1: int(os.getenv('ENRICHMENT_MAX_RETRIES_LOW', '2')),
+        2: int(os.getenv('ENRICHMENT_MAX_RETRIES_HIGH', '3')),
+        3: int(os.getenv('ENRICHMENT_MAX_RETRIES_CRITICAL', '5'))
+    },
+    'rate_limits': {
+        1: float(os.getenv('ENRICHMENT_RATE_LIMIT_LOW', '0.5')),
+        2: float(os.getenv('ENRICHMENT_RATE_LIMIT_HIGH', '0.2')),
+        3: float(os.getenv('ENRICHMENT_RATE_LIMIT_CRITICAL', '0.1'))
+    },
+    'api_timeout': int(os.getenv('ENRICHMENT_API_TIMEOUT', '10')),
+    'openlibrary_base_url': os.getenv('OPENLIBRARY_BASE_URL', 'https://openlibrary.org')
+}
 
-LLM_MODEL = os.getenv("BOOK_DESC_LLM_MODEL", "gpt-4o-mini")  # Still cost-effective for bulk processing
-_openai_client: AsyncOpenAI | None = None
-
-
-async def _get_openai_client() -> AsyncOpenAI:
-    global _openai_client
-    if _openai_client is None:
-        _openai_client = AsyncOpenAI(api_key=S.openai_api_key)
-    return _openai_client
-
-
-async def llm_description(title: str, author: str | None, genres: list[str], year: str | int | None) -> str | None:
-    """Call the LLM once to generate a <=50-word spoiler-free description.
-
-    Returns None on failure or if the model responds with UNKNOWN.
-    """
-    # Build prompt – keep it deterministic and safe
-    genres_str = ", ".join(genres) if genres else "unknown"
-    prompt = (
-        "You are a school librarian. "
-        "Write a spoiler-free, 40-50 word description of the book below. "
-        "If you are unsure, reply exactly: UNKNOWN\n\n"
-        f"Title: \"{title}\"\n"
-        f"Author: \"{author or 'Unknown'}\"\n"
-        f"Genres: {genres_str}\n"
-        f"Published: {year if year else 'unknown'}"
-    )
-
-    try:
-        oc = await _get_openai_client()
-        rsp = await oc.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=80,
-            temperature=0.7,
+class PriorityEnrichmentManager:
+    """Manages priority-based enrichment processing with retry logic."""
+    
+    def __init__(self):
+        self.priority_queues = {1: [], 2: [], 3: []}
+        self.last_call_times = {}
+        self.session = None
+        self.last_batch_time = 0
+        
+    async def initialize(self):
+        """Initialize HTTP session and database connections."""
+        self.session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=ENRICHMENT_CONFIG['api_timeout'])
         )
-        desc = rsp.choices[0].message.content.strip()
-        if desc.upper().startswith("UNKNOWN"):
-            return None
-        # Word count guard – naive split is fine
-        if 20 <= len(desc.split()) <= 60:
-            return desc
-        # Otherwise truncate politely
-        return " ".join(desc.split()[:55]) + "..."
-    except Exception:
-        logger.warning("LLM description generation failed", exc_info=True, extra={"title": title})
-        return None
-
-async def google_books(isbn, session):
-    logger.debug("Fetching from Google Books", extra={"isbn": isbn})
-    key_param = f"&key={S.google_books_api_key}" if S.google_books_api_key else ""
-    url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}{key_param}"
+        logger.info("Priority Enrichment Manager initialized")
     
-    try:
-        async with session.get(url) as r:
-            if r.status != 200:
-                logger.warning("Google Books API returned non-200 status", extra={
-                    "isbn": isbn,
-                    "status": r.status,
-                    "url": url
-                })
-                return {}
+    async def cleanup(self):
+        """Clean up resources."""
+        if self.session:
+            await self.session.close()
+    
+    async def add_to_queue(self, book_id: str, priority: int, reason: str = None, requester: str = None):
+        """Add book to priority queue and database tracking."""
+        if priority not in [1, 2, 3]:
+            priority = 2  # Default to high priority for unknown values
             
-            data = await r.json()
-            logger.debug("Google Books API response", extra={
-                "isbn": isbn,
-                "has_items": bool(data.get("items")),
-                "total_items": len(data.get("items", []))
-            })
-            return data
-            
-    except Exception as e:
-        logger.error("Failed to fetch from Google Books", exc_info=True, extra={"isbn": isbn, "url": url})
-        return {}
-
-async def open_library(isbn, session):
-    logger.debug("Fetching from Open Library", extra={"isbn": isbn})
-    url = f"https://openlibrary.org/isbn/{isbn}.json"
-    
-    try:
-        async with session.get(url) as r:
-            if r.status != 200:
-                logger.warning("Open Library API returned non-200 status", extra={
-                    "isbn": isbn,
-                    "status": r.status,
-                    "url": url
-                })
-                return {}
-            
-            data = await r.json()
-            logger.debug("Open Library API response", extra={
-                "isbn": isbn,
-                "has_title": bool(data.get("title")),
-                "has_publish_date": bool(data.get("publish_date"))
-            })
-            return data
-            
-    except Exception as e:
-        logger.error("Failed to fetch from Open Library", exc_info=True, extra={"isbn": isbn, "url": url})
-        return {}
-
-# ---------------------------------------------------------------------------
-# Batch Processing Configuration
-# ---------------------------------------------------------------------------
-
-BATCH_SIZE = int(os.getenv("BOOK_DESC_BATCH_SIZE", "50"))  # Process books in chunks
-MAX_CONCURRENT_REQUESTS = int(os.getenv("BOOK_DESC_MAX_CONCURRENT", "8"))  # Rate limiting
-
-
-async def process_book_descriptions_batch(books: List[Dict[str, Any]]) -> Dict[str, str]:
-    """Process multiple books concurrently for description generation.
-    
-    Returns a mapping of book_id -> description (or None if failed/unknown)
-    """
-    if not books:
-        return {}
-    
-    logger.info("Starting batch description processing", extra={
-        "book_count": len(books),
-        "batch_size": BATCH_SIZE,
-        "max_concurrent": MAX_CONCURRENT_REQUESTS
-    })
-    
-    # Process in smaller batches to avoid overwhelming the API
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-    results = {}
-    
-    async def process_single_book(book: Dict[str, Any]) -> tuple[str, str | None]:
-        """Process a single book with rate limiting."""
-        async with semaphore:
-            book_id = book["book_id"]
-            try:
-                description = await llm_description(
-                    book["title"], 
-                    book["author"], 
-                    book.get("genres", []), 
-                    book.get("publication_year")
-                )
-                return book_id, description
-            except Exception as e:
-                logger.warning("Failed to process book description", extra={
-                    "book_id": book_id,
-                    "error": str(e)
-                })
-                return book_id, None
-    
-    # Process all books concurrently
-    tasks = [process_single_book(book) for book in books]
-    batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    # Collect results
-    for result in batch_results:
-        if isinstance(result, Exception):
-            logger.error("Task failed with exception", exc_info=True)
-            continue
-        book_id, description = result
-        results[book_id] = description
-    
-    logger.info("Batch description processing completed", extra={
-        "processed": len(results),
-        "successful": len([d for d in results.values() if d is not None])
-    })
-    
-    return results
-
-
-async def enrich_all_missing_descriptions():
-    """Enrich all books missing descriptions in the catalog."""
-    logger.info("Starting bulk description enrichment")
-    
-    # Connect to database with retry logic
-    pg_url = str(S.db_url).replace("postgresql+asyncpg://", "postgresql://")
-    
-    max_retries = 10
-    retry_delay = 5
-    
-    for attempt in range(max_retries):
-        try:
-            conn = await asyncpg.connect(pg_url)
-            logger.info("Database connection established for bulk enrichment")
-            break
-        except Exception as e:
-            if attempt < max_retries - 1:
-                logger.warning(f"Bulk enrichment DB connection attempt {attempt + 1} failed, retrying in {retry_delay}s", extra={
-                    "attempt": attempt + 1,
-                    "max_retries": max_retries,
-                    "error": str(e)
-                })
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 1.5, 30)
-            else:
-                logger.error("Failed to connect to database for bulk enrichment after all retries", exc_info=True)
-                raise
-    
-    try:
-        # Fetch all books missing descriptions
-        books = await conn.fetch("""
-            SELECT book_id, title, author, genre, publication_year
-            FROM catalog 
-            WHERE description IS NULL
-            ORDER BY book_id
-        """)
-        
-        if not books:
-            logger.info("No books missing descriptions found")
-            return
-        
-        logger.info("Found books missing descriptions", extra={"count": len(books)})
-        
-        # Convert to list of dicts and parse genres
-        book_list = []
-        for row in books:
-            try:
-                genres = json.loads(row["genre"]) if row["genre"] else []
-            except Exception:
-                genres = []
-            
-            book_list.append({
-                "book_id": row["book_id"],
-                "title": row["title"],
-                "author": row["author"],
-                "genres": genres,
-                "publication_year": row["publication_year"]
-            })
-        
-        # Process in batches
-        total_processed = 0
-        total_updated = 0
-        
-        for i in range(0, len(book_list), BATCH_SIZE):
-            batch = book_list[i:i + BATCH_SIZE]
-            logger.info("Processing batch", extra={
-                "batch_num": i // BATCH_SIZE + 1,
-                "batch_size": len(batch),
-                "total_batches": (len(book_list) + BATCH_SIZE - 1) // BATCH_SIZE
-            })
-            
-            # Get descriptions for this batch
-            descriptions = await process_book_descriptions_batch(batch)
-            
-            # Update database for this batch
-            for book_id, description in descriptions.items():
-                if description is not None:
-                    await conn.execute(
-                        "UPDATE catalog SET description = $1 WHERE book_id = $2",
-                        description, book_id
-                    )
-                    total_updated += 1
-                    
-                    # Publish update event
-                    try:
-                        upd_evt = BookUpdatedEvent(
-                            book_id=book_id, 
-                            payload={"description_added": True}
-                        )
-                        await publish_event(BOOK_EVENTS_TOPIC, upd_evt.model_dump())
-                    except Exception:
-                        logger.warning("Failed to publish book updated event", extra={"book_id": book_id})
-                
-                total_processed += 1
-            
-            # Small delay between batches to be nice to the API
-            if i + BATCH_SIZE < len(book_list):
-                await asyncio.sleep(1)
-        
-        logger.info("Bulk description enrichment completed", extra={
-            "total_processed": total_processed,
-            "total_updated": total_updated,
-            "success_rate": f"{(total_updated/total_processed)*100:.1f}%" if total_processed > 0 else "0%"
+        self.priority_queues[priority].append({
+            'book_id': book_id,
+            'priority': priority,
+            'reason': reason or 'unknown',
+            'requester': requester or 'system',
+            'added_at': time.time()
         })
         
-    finally:
-        await conn.close()
-
-
-async def main():
-    logger.info("Starting book enrichment process")
-    logger.info("Rate limits", extra={"google_books_rpm": GB_PER_MIN, "open_library_rpm": OL_PER_MIN})
-    
-    # Check if we should do bulk description enrichment
-    if os.getenv("BULK_DESCRIPTION_ENRICHMENT") == "1":
-        logger.info("Running bulk description enrichment mode")
-        await enrich_all_missing_descriptions()
-        return
-    
-    # Original enrichment logic continues below...
-    logger.info("Running standard enrichment mode")
-    
-    # Connect to database with retry logic
-    logger.info("Connecting to database")
-    pg_url = str(S.db_url).replace("postgresql+asyncpg://", "postgresql://")
-    
-    max_retries = 10
-    retry_delay = 5
-    
-    for attempt in range(max_retries):
-        try:
-            conn = await asyncpg.connect(pg_url)
-            logger.info("Database connection established")
-            break
-        except Exception as e:
-            if attempt < max_retries - 1:
-                logger.warning(f"Database connection attempt {attempt + 1} failed, retrying in {retry_delay}s", extra={
-                    "attempt": attempt + 1,
-                    "max_retries": max_retries,
-                    "error": str(e)
-                })
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 1.5, 30)  # Exponential backoff, max 30s
-            else:
-                logger.error("Failed to connect to database after all retries", exc_info=True)
-                raise
-    
-    # Fetch books needing enrichment
-    logger.info("Fetching books requiring enrichment")
-    try:
-        books = await conn.fetch(
-            """SELECT book_id,isbn,description,title,author,genre,publication_year,page_count
-                   FROM catalog
-                  WHERE page_count IS NULL
-                     OR publication_year IS NULL
-                     OR description IS NULL"""
-        )
-        logger.info("Found books requiring enrichment", extra={"count": len(books)})
-    except Exception as e:
-        logger.error("Failed to fetch books from database", exc_info=True)
-        await conn.close()
-        raise
-    
-    # Setup rate limiting
-    sem_gb = asyncio.Semaphore(GB_PER_MIN)
-    sem_ol = asyncio.Semaphore(OL_PER_MIN)
-    
-    processed_count = 0
-    enriched_count = 0
-    google_books_success = 0
-    open_library_success = 0
-    readability_fallback = 0
-    
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as ses:
-        logger.info("Starting enrichment loop")
+        # Add to database tracking
+        await self.ensure_enrichment_tracking(book_id, priority, reason, requester)
         
-        for row in books:
-            processed_count += 1
-            book_id = row["book_id"]
-            isbn = row["isbn"]
-            description = row["description"]
-            title = row["title"]
-            author = row["author"]
-            genre_json = row["genre"]
+        logger.info(f"Added book {book_id} to priority {priority} queue (reason: {reason})")
+    
+    async def ensure_enrichment_tracking(self, book_id: str, priority: int, reason: str = None, requester: str = None):
+        """Ensure book has enrichment tracking record."""
+        try:
+            with SessionLocal() as db:
+                # Check if tracking record exists
+                result = db.execute(
+                    text("SELECT book_id FROM book_metadata_enrichment WHERE book_id = :book_id"),
+                    {"book_id": book_id}
+                )
+                existing = result.fetchone()
+                
+                if not existing:
+                    # Create new tracking record
+                    db.execute(
+                        text("""
+                            INSERT INTO book_metadata_enrichment 
+                            (book_id, priority, enrichment_status, attempts, created_at, updated_at)
+                            VALUES (:book_id, :priority, 'pending', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        """),
+                        {"book_id": book_id, "priority": priority}
+                    )
+                else:
+                    # Update priority if higher
+                    db.execute(
+                        text("""
+                            UPDATE book_metadata_enrichment 
+                            SET priority = GREATEST(priority, :priority),
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE book_id = :book_id
+                        """),
+                        {"book_id": book_id, "priority": priority}
+                    )
+                
+                # Always create enrichment request record
+                if reason:
+                    request_id = str(uuid.uuid4())
+                    db.execute(
+                        text("""
+                            INSERT INTO enrichment_requests 
+                            (request_id, book_id, requester, priority, reason, status, created_at)
+                            VALUES (:request_id, :book_id, :requester, :priority, :reason, 'pending', CURRENT_TIMESTAMP)
+                        """),
+                        {
+                            "request_id": request_id,
+                            "book_id": book_id,
+                            "requester": requester or 'system',
+                            "priority": priority,
+                            "reason": reason
+                        }
+                    )
+                
+                db.commit()
+                
+        except Exception as e:
+            logger.error(f"Error ensuring enrichment tracking for {book_id}: {e}")
+    
+    async def get_next_book(self) -> Optional[Dict[str, Any]]:
+        """Get next book to process in priority order."""
+        for priority in [3, 2, 1]:  # Critical first
+            if self.priority_queues[priority]:
+                return self.priority_queues[priority].pop(0)
+        return None
+    
+    async def wait_for_rate_limit(self, priority: int):
+        """Wait appropriate time based on priority rate limit."""
+        rate_limit = ENRICHMENT_CONFIG['rate_limits'][priority]
+        last_call = self.last_call_times.get(priority, 0)
+        time_since_last = time.time() - last_call
+        
+        if time_since_last < rate_limit:
+            sleep_time = rate_limit - time_since_last
+            await asyncio.sleep(sleep_time)
+        
+        self.last_call_times[priority] = time.time()
+    
+    async def fetch_work_details(self, work_key: str) -> Optional[Dict[str, Any]]:
+        """Fetch detailed work information from OpenLibrary API."""
+        try:
+            url = f"{ENRICHMENT_CONFIG['openlibrary_base_url']}{work_key}.json"
+            async with self.session.get(url) as response:
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    logger.warning(f"OpenLibrary API returned status {response.status} for {work_key}")
+                    return None
+        except Exception as e:
+            logger.warning(f"Failed to fetch work details for {work_key}: {e}")
+            return None
+    
+    async def fetch_edition_details(self, edition_key: str) -> Optional[Dict[str, Any]]:
+        """Fetch detailed edition information from OpenLibrary API."""
+        try:
+            url = f"{ENRICHMENT_CONFIG['openlibrary_base_url']}{edition_key}.json"
+            async with self.session.get(url) as response:
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    logger.warning(f"OpenLibrary API returned status {response.status} for {edition_key}")
+                    return None
+        except Exception as e:
+            logger.warning(f"Failed to fetch edition details for {edition_key}: {e}")
+            return None
+    
+    def extract_publication_year(self, work_data: Dict[str, Any], edition_data: Optional[Dict[str, Any]] = None) -> Optional[int]:
+        """Extract publication year from work or edition data."""
+        # Try edition data first (more specific)
+        if edition_data and 'publish_date' in edition_data:
             try:
-                genres = json.loads(genre_json) if genre_json else []
-            except Exception:
-                genres = []
-            pub_year = row["publication_year"]
+                date_str = edition_data['publish_date']
+                # Handle various date formats
+                import re
+                year_match = re.search(r'\b(19|20)\d{2}\b', str(date_str))
+                if year_match:
+                    year = int(year_match.group())
+                    if 1800 <= year <= 2030:
+                        return year
+            except (ValueError, TypeError):
+                pass
+        
+        # Try work data
+        if 'first_publish_date' in work_data:
+            try:
+                date_str = work_data['first_publish_date']
+                import re
+                year_match = re.search(r'\b(19|20)\d{2}\b', str(date_str))
+                if year_match:
+                    year = int(year_match.group())
+                    if 1800 <= year <= 2030:
+                        return year
+            except (ValueError, TypeError):
+                pass
+        
+        return None
+    
+    def extract_page_count(self, work_data: Dict[str, Any], edition_data: Optional[Dict[str, Any]] = None) -> Optional[int]:
+        """Extract page count from work or edition data."""
+        # Try edition data first
+        if edition_data:
+            for field in ['number_of_pages', 'pages', 'page_count']:
+                if field in edition_data and edition_data[field]:
+                    try:
+                        pages = int(edition_data[field])
+                        if 1 <= pages <= 5000:
+                            return pages
+                    except (ValueError, TypeError):
+                        continue
+        
+        # Try work data
+        if 'number_of_pages_median' in work_data and work_data['number_of_pages_median']:
+            try:
+                pages = int(work_data['number_of_pages_median'])
+                if 1 <= pages <= 5000:
+                    return pages
+            except (ValueError, TypeError):
+                pass
+        
+        return None
+    
+    def extract_isbn(self, edition_data: Optional[Dict[str, Any]]) -> Optional[str]:
+        """Extract ISBN from edition data."""
+        if not edition_data:
+            return None
+        
+        # Try various ISBN fields
+        for field in ['isbn_13', 'isbn_10', 'isbn']:
+            if field in edition_data and edition_data[field]:
+                isbns = edition_data[field]
+                if isinstance(isbns, list) and isbns:
+                    return str(isbns[0]).replace('-', '').replace(' ', '')
+                elif isinstance(isbns, str):
+                    return isbns.replace('-', '').replace(' ', '')
+        
+        return None
+    
+    async def enrich_book_metadata(self, book_id: str, priority: int) -> Dict[str, Any]:
+        """Enrich a single book with detailed metadata."""
+        start_time = time.time()
+        enrichment_data = {
+            'book_id': book_id,
+            'publication_year': None,
+            'page_count': None,
+            'isbn': None,
+            'enriched_at': time.time(),
+            'success': False,
+            'error_message': None
+        }
+        
+        try:
+            # Apply rate limiting
+            await self.wait_for_rate_limit(priority)
             
-            logger.debug("Processing book", extra={
-                "book_id": book_id,
-                "isbn": isbn,
-                "processed_count": processed_count,
-                "total_books": len(books)
-            })
-            
-            meta = {}
-            
-            # Try Google Books first
-            if isbn:
-                logger.debug("Attempting Google Books enrichment", extra={"book_id": book_id, "isbn": isbn})
-                async with sem_gb:
-                    meta = await google_books(isbn, ses)
-                await asyncio.sleep(60/GB_PER_MIN)
+            # Get book from database
+            with SessionLocal() as db:
+                result = db.execute(
+                    text("SELECT book_id, title FROM catalog WHERE book_id = :book_id"),
+                    {"book_id": book_id}
+                )
+                book = result.fetchone()
                 
-                if meta:
-                    google_books_success += 1
-                    logger.debug("Google Books enrichment successful", extra={"book_id": book_id})
+                if not book:
+                    enrichment_data['error_message'] = f"Book {book_id} not found in database"
+                    logger.warning(enrichment_data['error_message'])
+                    return enrichment_data
             
-            # Fallback to Open Library
-            if not meta and isbn:
-                logger.debug("Attempting Open Library enrichment", extra={"book_id": book_id, "isbn": isbn})
-                async with sem_ol:
-                    meta = await open_library(isbn, ses)
-                await asyncio.sleep(60/OL_PER_MIN)
-                
-                if meta:
-                    open_library_success += 1
-                    logger.debug("Open Library enrichment successful", extra={"book_id": book_id})
+            # Extract OpenLibrary work key from book_id
+            if book_id.startswith('OL') and book_id.endswith('W'):
+                work_key = f"/works/{book_id}"
+            elif book_id.startswith('OL'):
+                work_key = f"/works/{book_id[2:]}"  # Remove 'OL' prefix
+            else:
+                enrichment_data['error_message'] = f"Book {book_id} doesn't have OpenLibrary format"
+                logger.warning(enrichment_data['error_message'])
+                return enrichment_data
+            
+            # Fetch work details
+            work_data = await self.fetch_work_details(work_key)
+            if not work_data:
+                enrichment_data['error_message'] = f"Failed to fetch work data for {work_key}"
+                return enrichment_data
+            
+            # Try to get edition details for more specific data
+            edition_data = None
+            if 'editions' in work_data and work_data['editions']:
+                edition_key = work_data['editions'][0]  # Use first edition
+                if isinstance(edition_key, dict) and 'key' in edition_key:
+                    edition_key = edition_key['key']
+                edition_data = await self.fetch_edition_details(edition_key)
             
             # Extract metadata
-            page = None
-            year = None
-            if meta:
-                vi = meta.get("items", [{}])[0].get("volumeInfo", {}) if isinstance(meta, dict) else meta
-                page = vi.get("pageCount")
-                
-                # Validate page count - reject 0 or invalid values
-                if page is not None and (not isinstance(page, int) or page <= 0):
-                    logger.debug("Invalid page count received, treating as None", extra={
-                        "book_id": book_id,
-                        "invalid_page_count": page
-                    })
-                    page = None
-                
-                pub = vi.get("publishedDate", "")
-                if isinstance(pub, str):
-                    year = pub[:4]
-                elif "publish_date" in meta:
-                    year = meta.get("publish_date", "")[ -4: ]
-                
-                logger.debug("Extracted metadata", extra={
-                    "book_id": book_id,
-                    "page_count": page,
-                    "publication_year": year
-                })
+            enrichment_data['publication_year'] = self.extract_publication_year(work_data, edition_data)
+            enrichment_data['page_count'] = self.extract_page_count(work_data, edition_data)
+            enrichment_data['isbn'] = self.extract_isbn(edition_data) if edition_data else None
+            enrichment_data['success'] = True
             
-            # LLM description fallback --------------------------------------
-            if not description or len(str(description)) > 300:
-                description = await llm_description(title, author, genres, pub_year or year)
-
-            # Fallback to readability formula (difficulty_band only)
-            if page is None or not year or not year.isdigit():
-                logger.debug("Using readability formula fallback", extra={"book_id": book_id})
-                rb = readability_formula_estimator(description or "")
-                readability_fallback += 1
-            else:
-                rb = {}
+            processing_time = time.time() - start_time
+            logger.info(f"Enriched book {book_id} (priority {priority}) in {processing_time:.2f}s: "
+                       f"year={enrichment_data['publication_year']}, "
+                       f"pages={enrichment_data['page_count']}, "
+                       f"isbn={enrichment_data['isbn']}")
             
-            # Update database
-            try:
-                await conn.execute(
-                    "UPDATE catalog SET page_count=$1, publication_year=$2, description=COALESCE(description,$3), difficulty_band=COALESCE(difficulty_band,$4)"
-                    " WHERE book_id=$5",
-                    page, int(year) if year and year.isdigit() else None,
-                    description, rb.get("difficulty_band"), book_id)
-                
-                enriched_count += 1
-                logger.debug("Database updated successfully", extra={"book_id": book_id})
-                
-                # Publish BookUpdated event
-                try:
-                    upd_evt = BookUpdatedEvent(book_id=book_id, payload={"page_count": page, "publication_year": year, "description_added": bool(description)})
-                    await publish_event(BOOK_EVENTS_TOPIC, upd_evt.model_dump())
-                except Exception:
-                    logger.warning("Failed to publish book updated event", extra={"book_id": book_id})
+            # Note: Metrics recording removed temporarily for import compatibility
             
-            except Exception as e:
-                logger.error("Failed to update database", exc_info=True, extra={"book_id": book_id})
+            return enrichment_data
             
-            # Progress logging
-            if processed_count % 10 == 0:
-                logger.info("Enrichment progress", extra={
-                    "processed": processed_count,
-                    "total": len(books),
-                    "enriched": enriched_count,
-                    "google_books_success": google_books_success,
-                    "open_library_success": open_library_success,
-                    "readability_fallback": readability_fallback
-                })
+        except Exception as e:
+            processing_time = time.time() - start_time
+            enrichment_data['error_message'] = str(e)
+            logger.error(f"Error enriching book {book_id} (priority {priority}): {e}")
+            return enrichment_data
     
-    # Final summary
-    await conn.close()
-    logger.info("Book enrichment process completed", extra={
-        "total_processed": processed_count,
-        "total_enriched": enriched_count,
-        "google_books_success": google_books_success,
-        "open_library_success": open_library_success,
-        "readability_fallback": readability_fallback
-    })
+    async def update_book_in_database(self, enrichment_data: Dict[str, Any]) -> bool:
+        """Update book record with enriched metadata and tracking status."""
+        try:
+            book_id = enrichment_data['book_id']
+            
+            with SessionLocal() as db:
+                # Use the database function for atomic updates
+                if enrichment_data['success']:
+                    # Update with successful enrichment
+                    db.execute(
+                        text("""
+                            SELECT update_enrichment_status(
+                                :book_id, 'completed', :publication_year, :page_count, :isbn, NULL
+                            )
+                        """),
+                        {
+                            "book_id": book_id,
+                            "publication_year": enrichment_data['publication_year'],
+                            "page_count": enrichment_data['page_count'],
+                            "isbn": enrichment_data['isbn']
+                        }
+                    )
+                    logger.info(f"Successfully updated database for book {book_id}")
+                else:
+                    # Update with failure
+                    db.execute(
+                        text("""
+                            SELECT update_enrichment_status(
+                                :book_id, 'failed', NULL, NULL, NULL, :error_message
+                            )
+                        """),
+                        {
+                            "book_id": book_id,
+                            "error_message": enrichment_data['error_message']
+                        }
+                    )
+                    logger.warning(f"Marked book {book_id} as failed: {enrichment_data['error_message']}")
+                
+                db.commit()
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error updating database for book {enrichment_data['book_id']}: {e}")
+            return False
+    
+    async def should_retry(self, book_id: str, priority: int) -> bool:
+        """Check if book should be retried based on attempt count and priority."""
+        try:
+            with SessionLocal() as db:
+                result = db.execute(
+                    text("""
+                        SELECT attempts, enrichment_status, last_attempt 
+                        FROM book_metadata_enrichment 
+                        WHERE book_id = :book_id
+                    """),
+                    {"book_id": book_id}
+                )
+                record = result.fetchone()
+                
+                if not record:
+                    return True  # No record, first attempt
+                
+                attempts, status, last_attempt = record
+                max_retries = ENRICHMENT_CONFIG['max_retries'][priority]
+                
+                # Don't retry if already completed or max attempts reached
+                if status == 'completed' or attempts >= max_retries:
+                    return False
+                
+                # For failed attempts, check if enough time has passed (exponential backoff)
+                if last_attempt and status == 'failed':
+                    time_since_last = datetime.now() - last_attempt
+                    min_delay = timedelta(seconds=2 ** min(attempts, 6))  # Cap at 64 seconds
+                    return time_since_last >= min_delay
+                
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error checking retry status for {book_id}: {e}")
+            return False
+    
+    async def process_book(self, book_item: Dict[str, Any]) -> bool:
+        """Process a single book enrichment with retry logic."""
+        book_id = book_item['book_id']
+        priority = book_item['priority']
+        
+        # Check if we should retry this book
+        if not await self.should_retry(book_id, priority):
+            logger.debug(f"Skipping book {book_id} - no retry needed")
+            return False
+        
+        # Mark as in progress
+        try:
+            with SessionLocal() as db:
+                db.execute(
+                    text("""
+                        UPDATE book_metadata_enrichment 
+                        SET enrichment_status = 'in_progress',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE book_id = :book_id
+                    """),
+                    {"book_id": book_id}
+                )
+                db.commit()
+        except Exception as e:
+            logger.error(f"Error marking book {book_id} as in progress: {e}")
+        
+        # Enrich the book
+        enrichment_data = await self.enrich_book_metadata(book_id, priority)
+        
+        # Update database
+        success = await self.update_book_in_database(enrichment_data)
+        
+        # Send completion event
+        if success:
+            try:
+                completion_event = {
+                    'event_type': 'book_enrichment_completed',
+                    'book_id': book_id,
+                    'priority': priority,
+                    'success': enrichment_data['success'],
+                    'enrichment_data': enrichment_data,
+                    'timestamp': time.time()
+                }
+                await publish_event('book_events', completion_event)
+            except Exception as e:
+                logger.error(f"Error sending completion event for {book_id}: {e}")
+        
+        return success
+    
+    async def scan_for_pending_enrichments(self):
+        """Scan database for books needing enrichment and add to low priority queue."""
+        try:
+            with SessionLocal() as db:
+                # Use the database function to get enrichment batch
+                result = db.execute(
+                    text("SELECT * FROM get_enrichment_batch(:batch_size, :priority)"),
+                    {
+                        "batch_size": ENRICHMENT_CONFIG['batch_size'],
+                        "priority": 1  # Low priority for background processing
+                    }
+                )
+                books = result.fetchall()
+            
+            for book in books:
+                await self.add_to_queue(
+                    book.book_id, 
+                    priority=1, 
+                    reason='background_scan',
+                    requester='background_worker'
+                )
+            
+            if books:
+                logger.info(f"Added {len(books)} books to background enrichment queue")
+                
+        except Exception as e:
+            logger.error(f"Error scanning for pending enrichments: {e}")
+    
+    async def process_priority_queues(self):
+        """Process all priority queues in order."""
+        processed_count = 0
+        
+        while True:
+            book_item = await self.get_next_book()
+            if not book_item:
+                break
+                
+            try:
+                success = await self.process_book(book_item)
+                if success:
+                    processed_count += 1
+            except Exception as e:
+                logger.error(f"Error processing book {book_item['book_id']}: {e}")
+        
+        if processed_count > 0:
+            logger.info(f"Processed {processed_count} books from priority queues")
+    
+    async def get_health_status(self) -> Dict[str, Any]:
+        """Get current health status and metrics."""
+        try:
+            with SessionLocal() as db:
+                # Get queue depths by priority
+                result = db.execute(
+                    text("""
+                        SELECT priority, enrichment_status, COUNT(*) as count
+                        FROM book_metadata_enrichment 
+                        WHERE enrichment_status IN ('pending', 'in_progress')
+                        GROUP BY priority, enrichment_status
+                    """)
+                )
+                queue_stats = {}
+                for row in result.fetchall():
+                    priority, status, count = row
+                    if priority not in queue_stats:
+                        queue_stats[priority] = {}
+                    queue_stats[priority][status] = count
+                
+                # Get processing rate over last hour
+                result = db.execute(
+                    text("""
+                        SELECT COUNT(*) as completed_last_hour
+                        FROM book_metadata_enrichment 
+                        WHERE enriched_at > NOW() - INTERVAL '1 hour'
+                          AND enrichment_status = 'completed'
+                    """)
+                )
+                completed_last_hour = result.fetchone()[0]
+                
+                return {
+                    'status': 'healthy',
+                    'queue_stats': queue_stats,
+                    'completed_last_hour': completed_last_hour,
+                    'in_memory_queues': {
+                        priority: len(queue) for priority, queue in self.priority_queues.items()
+                    },
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+        except Exception as e:
+            logger.error(f"Error getting health status: {e}")
+            return {
+                'status': 'unhealthy',
+                'error': str(e),
+                'timestamp': datetime.now().isoformat()
+            }
+
+# Main processing functions
+async def process_kafka_message(manager: PriorityEnrichmentManager, message: Dict[str, Any]):
+    """Process enrichment request from Kafka."""
+    try:
+        event_type = message.get('event_type', 'book_enrichment_requested')
+        book_id = message.get('book_id')
+        
+        if not book_id:
+            logger.warning("Received Kafka message without book_id")
+            return
+        
+        # Extract priority (default to 2 for backward compatibility)
+        priority = message.get('priority', 2)
+        reason = message.get('reason', 'kafka_request')
+        requester = message.get('requester', 'unknown')
+        
+        logger.info(f"Processing Kafka enrichment request for book {book_id} "
+                   f"(priority {priority}, reason: {reason})")
+        
+        await manager.add_to_queue(book_id, priority, reason, requester)
+        
+    except Exception as e:
+        logger.error(f"Error processing Kafka message: {e}")
+
+async def setup_kafka_consumer(manager: PriorityEnrichmentManager):
+    """Setup and run Kafka consumer for enrichment requests."""
+    consumer = AIOKafkaConsumer(
+        'book_enrichment_requests',
+        bootstrap_servers=settings.kafka_bootstrap,
+        group_id="book_enrichment_worker",
+        value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+        auto_offset_reset="earliest"
+    )
+    
+    await consumer.start()
+    logger.info("Started Kafka consumer for enrichment requests")
+    
+    try:
+        async for message in consumer:
+            try:
+                await process_kafka_message(manager, message.value)
+            except Exception as e:
+                logger.error(f"Error processing Kafka message: {e}")
+    finally:
+        await consumer.stop()
+
+async def main():
+    """Main worker loop with priority-based enrichment processing."""
+    logger.info("Starting Enhanced Book Enrichment Worker with Priority Processing")
+    logger.info(f"Configuration: {ENRICHMENT_CONFIG}")
+    
+    manager = PriorityEnrichmentManager()
+    await manager.initialize()
+    
+    try:
+        # Start Kafka consumer in background
+        kafka_task = asyncio.create_task(setup_kafka_consumer(manager))
+        
+        last_health_log = 0
+        
+        while True:
+            try:
+                # 1. Process priority queues
+                await manager.process_priority_queues()
+                
+                # 2. Background batch processing (every 30 seconds)
+                current_time = time.time()
+                if current_time - manager.last_batch_time >= ENRICHMENT_CONFIG['batch_interval']:
+                    await manager.scan_for_pending_enrichments()
+                    manager.last_batch_time = current_time
+                
+                # 3. Log health status every 5 minutes
+                if current_time - last_health_log >= 300:
+                    health_status = await manager.get_health_status()
+                    logger.info(f"Health status: {health_status}")
+                    last_health_log = current_time
+                
+                # Short sleep to prevent busy waiting
+                await asyncio.sleep(1)
+                
+            except KeyboardInterrupt:
+                logger.info("Received shutdown signal")
+                kafka_task.cancel()
+                break
+            except Exception as e:
+                logger.error(f"Error in main loop: {e}")
+                await asyncio.sleep(5)  # Longer delay on errors
+                
+    finally:
+        await manager.cleanup()
+        logger.info("Book Enrichment Worker shutdown complete")
 
 if __name__ == "__main__":
-    logger.info("Starting book enrichment worker")
-    try:
-        asyncio.run(main())
-        logger.info("Book enrichment worker completed successfully")
-    except KeyboardInterrupt:
-        logger.info("Book enrichment worker interrupted by user")
-    except Exception as e:
-        logger.error("Book enrichment worker failed", exc_info=True)
-        raise 
+    asyncio.run(main())

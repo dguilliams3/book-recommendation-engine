@@ -1,1 +1,1 @@
-"""Consumes Kafka metrics and writes JSON logs.""" 
+"""Consumes Kafka metrics and writes JSON logs."""

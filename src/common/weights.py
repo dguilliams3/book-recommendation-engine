@@ -4,13 +4,14 @@ The module loads a JSON file (path comes from Settings) and keeps it in
 memory, hot-reloading every few seconds in a daemon thread so the service
 can pick up tweaks without a restart.
 """
+
 from __future__ import annotations
 
 import json, threading, time
 from pathlib import Path
 from typing import Any, Dict
 
-from . import SettingsInstance as S
+from .settings import settings as S
 
 _DEFAULT_WEIGHTS: Dict[str, Any] = {
     "reading_match": 1.0,
@@ -52,10 +53,11 @@ def get() -> Dict[str, Any]:
 
 # Hot-reload thread ---------------------------------------------------------
 
+
 def _watch():
     while True:
         time.sleep(3)
         _load_once()
 
 
-threading.Thread(target=_watch, daemon=True).start() 
+threading.Thread(target=_watch, daemon=True).start()

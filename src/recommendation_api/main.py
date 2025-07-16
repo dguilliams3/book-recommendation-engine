@@ -1,9 +1,15 @@
 import asyncio, json, os, uuid, time, sys
 from fastapi import FastAPI, HTTPException, Request, Query
-from starlette.responses import JSONResponse
+from fastapi.responses import JSONResponse
+from fastapi.responses import Response
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from mcp import StdioServerParameters, stdio_client, ClientSession
-from common import SettingsInstance as S
+from common.settings import settings as S
 from common.structured_logging import get_logger, SERVICE_NAME
+from common.settings import settings
 from langchain.prompts import ChatPromptTemplate
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy import text
@@ -13,26 +19,86 @@ from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 from common.kafka_utils import publish_event
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import timedelta, datetime
 from langchain_core.messages import AIMessage
 from langchain.callbacks.base import AsyncCallbackHandler
 import inspect  # for token usage
 from pathlib import Path
+
 # import service layer
 from .service import (
     BookRecommendation,
     RecommendResponse,
     generate_recommendations,
+    generate_reader_recommendations,
+    generate_agent_recommendations,
 )
 from common.metrics import REQUEST_COUNTER, REQUEST_LATENCY
-from pydantic import BaseModel, Field
-from typing import List, Dict, Any
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Dict, Any, Optional
+from common.events import FeedbackEvent, FEEDBACK_EVENTS_TOPIC
+
+
+async def _validate_configuration():
+    """Validate critical configuration on startup."""
+    logger.info("Validating configuration")
+    errors = []
+
+    # Check required environment variables
+    if not S.openai_api_key:
+        errors.append("OPENAI_API_KEY not configured")
+
+    if not S.db_url:
+        errors.append("Database URL not configured")
+
+    # Validate database connection
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        logger.info("Database connection validated")
+    except Exception as e:
+        errors.append(f"Database connection failed: {e}")
+
+    # Validate Redis connection (non-critical)
+    try:
+        from common.redis_utils import get_redis_client
+
+        redis_client = get_redis_client()
+        if redis_client:
+            await redis_client.ping()
+            logger.info("Redis connection validated")
+        else:
+            logger.warning("Redis not available, using fallback")
+    except Exception as e:
+        logger.warning(f"Redis connection failed: {e}")
+
+    # Validate vector store directory
+    try:
+        S.vector_store_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Vector store directory validated")
+    except Exception as e:
+        errors.append(f"Vector store directory creation failed: {e}")
+
+    # Validate model configuration
+    if S.model_max_tokens <= 0:
+        errors.append("MODEL_MAX_TOKENS must be positive")
+
+    if S.similarity_threshold < 0 or S.similarity_threshold > 1:
+        errors.append("SIMILARITY_THRESHOLD must be between 0 and 1")
+
+    if errors:
+        logger.error("Configuration validation failed", extra={"errors": errors})
+        raise ValueError(f"Configuration validation failed: {'; '.join(errors)}")
+
+    logger.info("Configuration validation completed successfully")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage startup and shutdown tasks using FastAPI lifespan events."""
     logger.info("Starting up recommendation API")
     try:
+        await _validate_configuration()
         await _ensure_tables()
     except Exception:
         logger.error("Failed to start up recommendation API", exc_info=True)
@@ -45,20 +111,21 @@ async def lifespan(app: FastAPI):
     # Producer cleanup handled automatically per event loop
     logger.debug("Kafka producer cleanup handled automatically")
 
+
 app = FastAPI(
     title="Book Recommendation Engine API",
     description="AI-powered book recommendation system for educational institutions",
     version="1.0.0",
-    contact={
-        "name": "Dan Guilliams",
-        "email": "dan@example.com"
-    },
-    license_info={
-        "name": "MIT",
-        "url": "https://opensource.org/licenses/MIT"
-    },
-    lifespan=lifespan
+    contact={"name": "Dan Guilliams", "email": "dan@example.com"},
+    license_info={"name": "MIT", "url": "https://opensource.org/licenses/MIT"},
+    lifespan=lifespan,
 )
+
+# Rate limiting configuration
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 logger = get_logger(__name__)
 
 # --- auto-DDL setup ----------------------------------------------------
@@ -73,14 +140,16 @@ else:
     async_db_url = db_url_str
 engine = create_async_engine(async_db_url, echo=False)
 
+
 async def _ensure_tables():
     logger.info("Ensuring database tables exist")
     try:
         async with engine.begin() as conn:
             await conn.run_sync(db_models.Base.metadata.create_all)
             # Additional idempotent DDL for recommendation_history with composite PK
-            await conn.execute(text(
-                """
+            await conn.execute(
+                text(
+                    """
                 CREATE TABLE IF NOT EXISTS recommendation_history (
                     student_id TEXT NOT NULL,
                     book_id TEXT NOT NULL,
@@ -89,15 +158,18 @@ async def _ensure_tables():
                     PRIMARY KEY (student_id, book_id)
                 );
                 """
-            ))
+                )
+            )
         logger.info("Database tables verified/created successfully")
     except Exception as e:
         logger.error("Failed to create database tables", exc_info=True)
         raise
 
+
 # --- metrics -----------------------------------------------------------
 logger.info("Initializing Kafka producer for metrics")
 TOPIC = "api_metrics"
+
 
 async def push_metric(event: str, extra: dict | None = None):
     """Send metric to Kafka and Redis without blocking the caller."""
@@ -110,27 +182,34 @@ async def push_metric(event: str, extra: dict | None = None):
         try:
             # Send to Kafka
             await publish_event(TOPIC, payload)
-            logger.debug("Metric pushed to Kafka", extra={"event": event, "payload": payload})
-            
+            logger.debug(
+                "Metric pushed to Kafka", extra={"event": event, "payload": payload}
+            )
+
             # Also store in Redis for Streamlit access
             try:
                 from common.redis_utils import get_redis_client
+
                 redis_client = get_redis_client()
                 redis_key = "metrics:api:recent"
-                
+
                 import json
+
                 await redis_client.lpush(redis_key, json.dumps(payload))
                 await redis_client.ltrim(redis_key, 0, 19)  # Keep only last 20
-                
-                logger.debug("Metric stored in Redis", extra={"event": event, "key": redis_key})
+
+                logger.debug(
+                    "Metric stored in Redis", extra={"event": event, "key": redis_key}
+                )
             except Exception as redis_error:
                 logger.warning(f"Failed to store metric in Redis: {redis_error}")
-                
+
         except Exception:
             logger.error("Failed to push metric", exc_info=True, extra={"event": event})
 
     # Fire-and-forget so the caller returns immediately
     asyncio.create_task(_send())
+
 
 # --- FastMCP lifecycle -------------------------------------------------
 logger.info("Setting up FastMCP server parameters")
@@ -162,6 +241,7 @@ chat_model = ChatOpenAI(
 )
 logger.info("ChatOpenAI model initialised for ReAct agent")
 
+
 async def ask_agent(agent, query: str, callbacks=None):
     logger.info("Executing agent query:")
     logger.debug(f"Query: {query}")
@@ -171,38 +251,214 @@ async def ask_agent(agent, query: str, callbacks=None):
 
     # Get the final AI message (the actual analysis)
     final_message = next(
-        msg for msg in reversed(response["messages"]) if isinstance(msg, AIMessage) and msg.content
+        msg
+        for msg in reversed(response["messages"])
+        if isinstance(msg, AIMessage) and msg.content
     )
     logger.debug(f"Final message: {final_message}")
     # Return both the final message and the response json with metadata
     return final_message, response
 
+
 # --- endpoints ---------------------------------------------------------
 @app.get("/health")
-def health():
+async def health():
+    """Comprehensive health check that tests all critical system components."""
     logger.debug("Health check requested")
-    return {"status": "ok"}
+    health_status = {"status": "ok", "timestamp": time.time(), "components": {}}
+
+    # Test database connection
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        health_status["components"]["database"] = {
+            "status": "healthy",
+            "response_time_ms": 0,
+        }
+    except Exception as e:
+        health_status["components"]["database"] = {
+            "status": "unhealthy",
+            "error": str(e),
+        }
+        health_status["status"] = "degraded"
+
+    # Test Redis connection
+    try:
+        from common.redis_utils import get_redis_client
+
+        redis_client = get_redis_client()
+        if redis_client:
+            await redis_client.ping()
+            health_status["components"]["redis"] = {"status": "healthy"}
+        else:
+            health_status["components"]["redis"] = {
+                "status": "unavailable",
+                "note": "Using fallback",
+            }
+    except Exception as e:
+        health_status["components"]["redis"] = {"status": "unhealthy", "error": str(e)}
+        health_status["status"] = "degraded"
+
+    # Test LLM microservice connection
+    try:
+        from common.llm_client import get_llm_client
+        
+        llm_client = get_llm_client()
+        llm_health = await llm_client.health_check()
+        health_status["components"]["llm_service"] = llm_health
+        
+        if llm_health["status"] != "healthy":
+            health_status["status"] = "degraded"
+            
+    except Exception as e:
+        health_status["components"]["llm_service"] = {
+            "status": "unhealthy", 
+            "error": str(e)
+        }
+        health_status["status"] = "degraded"
+
+    # Test OpenAI API availability (lightweight check)
+    try:
+        # Just check if we have API key configured
+        if S.openai_api_key:
+            health_status["components"]["openai"] = {"status": "configured"}
+        else:
+            health_status["components"]["openai"] = {"status": "not_configured"}
+            health_status["status"] = "degraded"
+    except Exception as e:
+        health_status["components"]["openai"] = {"status": "error", "error": str(e)}
+        health_status["status"] = "degraded"
+
+    # Test vector store availability
+    try:
+        vector_store_path = S.vector_store_dir
+        if vector_store_path.exists():
+            health_status["components"]["vector_store"] = {"status": "available"}
+        else:
+            health_status["components"]["vector_store"] = {"status": "not_initialized"}
+    except Exception as e:
+        health_status["components"]["vector_store"] = {
+            "status": "error",
+            "error": str(e),
+        }
+        health_status["status"] = "degraded"
+
+    # Return appropriate HTTP status code
+    status_code = 200 if health_status["status"] == "ok" else 503
+    return JSONResponse(content=health_status, status_code=status_code)
+
 
 @app.get("/metrics")
 async def metrics():
-    logger.debug("Metrics endpoint requested")
-    return JSONResponse({"status": "ok"})
+    """Prometheus-format metrics for scraping."""
+    from common.metrics import _PROM
+
+    if not _PROM:
+        return JSONResponse(
+            {"detail": "prometheus_client not installed"}, status_code=501
+        )
+    data = generate_latest()
+    return Response(content=data, media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/live")
+async def live():
+    """Liveness probe – cheap."""
+    import time
+
+    return {"status": "alive", "timestamp": time.time()}
+
+
+@app.get("/ready")
+async def ready():
+    """Readiness probe that delegates to health check."""
+    return await health()
+
 
 # --- Pydantic models for Swagger --------------------------------------------
 class BookRow(BaseModel, extra="allow"):
     """Flexible model that accepts any catalog columns."""
-    book_id: str = Field(..., example="B001")
+
+    book_id: str = Field(..., examples=["B001"])
+
 
 class BooksResponse(BaseModel):
     rows: List[BookRow]
 
+
 class MetricItem(BaseModel):
-    label: str = Field(..., example="recommendation_served")
-    value: int = Field(..., example=42)
+    label: str = Field(..., examples=["recommendation_served"])
+    value: int = Field(..., examples=[42])
+
+
+# --- Reader Mode Models ---
+class FeedbackRequest(BaseModel):
+    """Request model for reader feedback submission."""
+
+    user_hash_id: str = Field(
+        ..., description="Hashed user identifier", min_length=1, max_length=100
+    )
+    book_id: str = Field(
+        ..., description="Book ID that received feedback", min_length=1, max_length=50
+    )
+    score: int = Field(
+        ..., description="Feedback score: 1 for thumbs up, -1 for thumbs down"
+    )
+    feedback_text: Optional[str] = Field(
+        None, description="Optional feedback text", max_length=1000
+    )
+
+    @field_validator("score")
+    @classmethod
+    def validate_score(cls, v):
+        if v not in [-1, 1]:
+            raise ValueError("Score must be either 1 (thumbs up) or -1 (thumbs down)")
+        return v
+
+    @field_validator("user_hash_id")
+    @classmethod
+    def validate_user_hash_id(cls, v):
+        if not v.strip():
+            raise ValueError("User hash ID cannot be empty")
+        return v.strip()
+
+    @field_validator("book_id")
+    @classmethod
+    def validate_book_id(cls, v):
+        if not v.strip():
+            raise ValueError("Book ID cannot be empty")
+        return v.strip()
+
+
+class FeedbackResponse(BaseModel):
+    """Response model for feedback submission."""
+
+    message: str
+    request_id: str
+
+
+class ReaderRecommendResponse(BaseModel):
+    """Response model for reader recommendations."""
+
+    request_id: str
+    user_hash_id: str
+    recommendations: List[BookRecommendation]
+    duration_sec: float
+    based_on_books: List[str]  # Titles of books used for similarity
+
+
+class UserBooksResponse(BaseModel):
+    """Response model for user's uploaded books."""
+
+    user_hash_id: str
+    books: List[Dict[str, Any]]
+    total_count: int
+
 
 # ---------------------------------------------------------------------------
 # New endpoints for React UI -------------------------------------------------
 # ---------------------------------------------------------------------------
+
 
 @app.get(
     "/books",
@@ -215,7 +471,9 @@ class MetricItem(BaseModel):
         500: {"description": "Database query failed"},
     },
 )
-async def get_books(limit: int = Query(100, ge=1, le=500, description="Max rows to return")):
+async def get_books(
+    limit: int = Query(100, ge=1, le=500, description="Max rows to return")
+):
     """Simple endpoint so the React UI can populate its data-explorer table."""
     try:
         async with engine.connect() as conn:
@@ -230,6 +488,7 @@ async def get_books(limit: int = Query(100, ge=1, le=500, description="Max rows 
     except Exception as exc:
         logger.error("Failed to fetch books", exc_info=True)
         raise HTTPException(500, "Failed to fetch books") from exc
+
 
 @app.get(
     "/metrics/summary",
@@ -266,9 +525,10 @@ async def metrics_summary():
         # Graceful degradation – return placeholder instead of 500 so UI chart renders
         return [{"label": "no_data", "value": 0}]
 
+
 @app.post(
-    "/recommend", 
-    response_model=RecommendResponse, 
+    "/recommend",
+    response_model=RecommendResponse,
     response_model_exclude_none=True,
     summary="Generate book recommendations for a student",
     description="""
@@ -299,12 +559,12 @@ async def metrics_summary():
                                 "author": "E.B. White",
                                 "reading_level": 5.2,
                                 "librarian_blurb": "A heartwarming tale of friendship between a pig and spider.",
-                                "justification": "Matches student's interest in animal stories and appropriate reading level."
+                                "justification": "Matches student's interest in animal stories and appropriate reading level.",
                             }
-                        ]
+                        ],
                     }
                 }
-            }
+            },
         },
         422: {
             "description": "Invalid request parameters",
@@ -315,44 +575,85 @@ async def metrics_summary():
                             {
                                 "loc": ["query", "student_id"],
                                 "msg": "field required",
-                                "type": "value_error.missing"
+                                "type": "value_error.missing",
                             }
                         ]
                     }
                 }
-            }
+            },
         },
         500: {
             "description": "Internal server error during recommendation generation",
             "content": {
                 "application/json": {
-                    "example": {
-                        "detail": "Failed to generate recommendation"
-                    }
+                    "example": {"detail": "Failed to generate recommendation"}
                 }
-            }
-        }
+            },
+        },
     },
-    tags=["recommendations"]
+    tags=["recommendations"],
 )
+@limiter.limit("10/minute")
 async def recommend(
-    student_id: str = Query(..., description="Student identifier (e.g., 'S001')", example="S001"),
-    n: int = Query(3, ge=1, le=10, description="Number of recommendations to return", example=3),
-    query: str = Query("", description="Optional search query to filter recommendations", example="space adventure")
+    request: Request,
+    student_id: str = Query(
+        ..., description="Student identifier (e.g., 'S001')", examples=["S001"]
+    ),
+    n: int = Query(
+        3, ge=1, le=10, description="Number of recommendations to return", examples=[3]
+    ),
+    query: str = Query(
+        "",
+        description="Optional search query to filter recommendations",
+        examples=["space adventure"],
+    ),
 ):
     request_id = uuid.uuid4().hex
 
-    logger.info("Recommendation request received", extra={
-        "request_id": request_id,
-        "student_id": student_id,
-        "n": n,
-        "query": query,
-    })
+    logger.info(
+        "Recommendation request received",
+        extra={
+            "request_id": request_id,
+            "student_id": student_id,
+            "n": n,
+            "query": query,
+        },
+    )
 
     started = time.perf_counter()
 
     try:
-        recs, meta = await generate_recommendations(student_id, query, n, request_id)
+        # Build student context for unified agent function
+        from .service import _get_student_context_cached
+        from .candidate_builder import build_candidates
+        from .scoring import score_candidates
+
+        # Get student context
+        avg_level, recent_titles, top_genres, band_hist = (
+            await _get_student_context_cached(student_id)
+        )
+
+        # Build and score candidates
+        candidates = await build_candidates(student_id, n)
+        scored_candidates = score_candidates(candidates)
+
+        # Extract candidates from scored tuples (score, candidate)
+        candidate_list = [candidate for score, candidate in scored_candidates]
+
+        # Build context for unified agent
+        context = {
+            "student_id": student_id,
+            "candidates": candidate_list,
+            "avg_level": avg_level,
+            "recent_titles": recent_titles,
+            "top_genres": top_genres,
+            "band_hist": band_hist,
+        }
+
+        # Use unified agent function
+        recs, meta = await generate_agent_recommendations(
+            "student", context, query, n, request_id
+        )
 
         total_duration = time.perf_counter() - started
 
@@ -373,13 +674,401 @@ async def recommend(
             request_id=request_id,
             duration_sec=round(total_duration, 3),
             recommendations=recs,
-            student_avg_level=meta.get('student_avg_level'),
-            recent_books=meta.get('recent_books'),
+            student_avg_level=meta.get("student_avg_level"),
+            recent_books=meta.get("recent_books"),
         )
 
     except Exception as exc:
-        logger.error("Recommendation request failed", exc_info=True, extra={"request_id": request_id})
+        logger.error(
+            "Recommendation request failed",
+            exc_info=True,
+            extra={"request_id": request_id},
+        )
         raise HTTPException(500, "Failed to generate recommendation") from exc
+
+
+# ---------------------------------------------------------------------------
+# Reader Mode Endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.post(
+    "/feedback",
+    response_model=FeedbackResponse,
+    summary="Submit reader feedback on book recommendations",
+    description="""
+    Submit thumbs up/down feedback on book recommendations in Reader Mode.
+    Feedback is processed asynchronously and used to improve future recommendations.
+    """,
+    responses={
+        200: {"description": "Feedback submitted successfully"},
+        422: {"description": "Invalid feedback data"},
+        500: {"description": "Failed to process feedback"},
+    },
+    tags=["reader-mode"],
+)
+@limiter.limit("30/minute")
+async def submit_feedback(request: Request, feedback: FeedbackRequest):
+    # Check if Reader Mode is enabled
+    if not settings.enable_reader_mode:
+        logger.warning("Reader Mode feedback endpoint called but feature is disabled")
+        raise HTTPException(
+            status_code=404,
+            detail="Reader Mode is currently disabled. Set ENABLE_READER_MODE=true to enable this feature.",
+        )
+    """Submit feedback for a book recommendation."""
+    request_id = uuid.uuid4().hex
+
+    logger.info(
+        "Feedback submission received",
+        extra={
+            "request_id": request_id,
+            "user_hash_id": feedback.user_hash_id,
+            "book_id": feedback.book_id,
+            "score": feedback.score,
+        },
+    )
+
+    try:
+        # Create feedback event
+        event = FeedbackEvent(
+            user_hash_id=feedback.user_hash_id,
+            book_id=feedback.book_id,
+            score=feedback.score,
+        )
+
+        # Publish to Kafka for async processing
+        await publish_event(FEEDBACK_EVENTS_TOPIC, event.model_dump())
+
+        logger.info(
+            "Feedback event published",
+            extra={
+                "request_id": request_id,
+                "user_hash_id": feedback.user_hash_id,
+                "book_id": feedback.book_id,
+            },
+        )
+
+        return FeedbackResponse(
+            message="Feedback submitted successfully", request_id=request_id
+        )
+
+    except Exception as exc:
+        logger.error(
+            "Failed to submit feedback", exc_info=True, extra={"request_id": request_id}
+        )
+        raise HTTPException(500, "Failed to process feedback") from exc
+
+
+@app.get(
+    "/recommendations/{user_hash_id}",
+    response_model=ReaderRecommendResponse,
+    summary="Get personalized recommendations for a reader",
+    description="""
+    Generate personalized book recommendations for a Reader Mode user based on their
+    uploaded book list and feedback history. Uses book similarity and collaborative
+    filtering to suggest relevant books.
+    """,
+    responses={
+        200: {"description": "Recommendations generated successfully"},
+        404: {"description": "User not found"},
+        500: {"description": "Failed to generate recommendations"},
+    },
+    tags=["reader-mode"],
+)
+@limiter.limit("20/minute")
+async def get_reader_recommendations(
+    request: Request,
+    user_hash_id: str,
+    n: int = Query(5, ge=1, le=20, description="Number of recommendations to return"),
+    query: str = Query(
+        "", description="Optional search query to filter recommendations"
+    ),
+):
+    # Check if Reader Mode is enabled
+    if not settings.enable_reader_mode:
+        logger.warning(
+            "Reader Mode recommendations endpoint called but feature is disabled"
+        )
+        raise HTTPException(
+            status_code=404,
+            detail="Reader Mode is currently disabled. Set ENABLE_READER_MODE=true to enable this feature.",
+        )
+    """Get personalized recommendations for a reader."""
+    request_id = uuid.uuid4().hex
+
+    logger.info(
+        "Reader recommendation request received",
+        extra={
+            "request_id": request_id,
+            "user_hash_id": user_hash_id,
+            "n": n,
+            "query": query,
+        },
+    )
+
+    started = time.perf_counter()
+
+    try:
+        # Check if user exists
+        async with engine.begin() as conn:
+            user_exists = await conn.execute(
+                text(
+                    "SELECT 1 FROM public_users WHERE hash_id = :user_hash_id LIMIT 1"
+                ),
+                {"user_hash_id": user_hash_id},
+            )
+            if not user_exists.fetchone():
+                raise HTTPException(404, f"User {user_hash_id} not found")
+
+        # Build reader context for unified agent function
+        from .service import (
+            _fetch_user_uploaded_books_cached,
+            _fetch_user_feedback_scores_cached,
+        )
+
+        # Get user's uploaded books and feedback
+        uploaded_books = await _fetch_user_uploaded_books_cached(user_hash_id)
+        feedback_scores = await _fetch_user_feedback_scores_cached(user_hash_id)
+
+        # Always use LLM agent for reader recommendations
+        if not uploaded_books:
+            # Build fallback candidates when no uploaded books
+            from .service import _get_fallback_recommendations
+
+            async with engine.begin() as conn:
+                fallback_candidates = await _get_fallback_recommendations(
+                    n * 3, conn
+                )  # Get more candidates for agent to choose from
+
+            # Build context for unified agent (empty uploaded books)
+            context = {
+                "user_hash_id": user_hash_id,
+                "uploaded_books": [],
+                "feedback_scores": feedback_scores,
+                "candidates": fallback_candidates,
+            }
+        else:
+            # Build candidates based on uploaded books
+            from .service import _fetch_similar_books
+
+            async with engine.begin() as conn:
+                candidates = await _fetch_similar_books(
+                    uploaded_books, user_hash_id, conn
+                )
+
+            # Build context for unified agent
+            context = {
+                "user_hash_id": user_hash_id,
+                "uploaded_books": uploaded_books,
+                "feedback_scores": feedback_scores,
+                "candidates": candidates,
+            }
+
+        # Always use unified agent function for LLM-based recommendations
+        recs, meta = await generate_agent_recommendations(
+            "reader", context, query, n, request_id
+        )
+
+        total_duration = time.perf_counter() - started
+
+        # Log metrics
+        asyncio.create_task(
+            push_metric(
+                "reader_recommendation_served",
+                {
+                    "request_id": request_id,
+                    "user_hash_id": user_hash_id,
+                    "n": n,
+                    "duration_sec": total_duration,
+                    **meta,
+                },
+            )
+        )
+
+        # Log recommendation history to database for deduplication and analytics
+        # This enables tracking what books were recommended to prevent immediate duplicates
+        try:
+            async with engine.begin() as conn:
+                # Get user UUID from hash_id for foreign key constraint
+                user_result = await conn.execute(
+                    text("SELECT id FROM public_users WHERE hash_id = :user_hash_id"),
+                    {"user_hash_id": user_hash_id}
+                )
+                user_row = user_result.fetchone()
+                if user_row:
+                    user_uuid = user_row.id
+                    
+                    # Insert each recommendation into history
+                    for rec in recs:
+                        await conn.execute(
+                            text("""
+                                INSERT INTO recommendation_history 
+                                (user_id, book_id, request_id, algorithm_used, score, metadata, created_at)
+                                VALUES (:user_id, :book_id, :request_id, :algorithm, :score, :metadata, NOW())
+                            """),
+                            {
+                                "user_id": user_uuid,
+                                "book_id": rec.book_id,
+                                "request_id": request_id,
+                                "algorithm": "reader_semantic_search" if "semantic_search" in meta.get("tools", []) else "reader_traditional",
+                                "score": 1.0,  # Default confidence score
+                                "metadata": json.dumps({
+                                    "query": query,
+                                    "justification": rec.justification,
+                                    "reading_level": rec.reading_level,
+                                    "generation_method": meta.get("tools", [])
+                                })
+                            }
+                        )
+                    logger.info(
+                        "Recommendation history logged",
+                        extra={
+                            "request_id": request_id,
+                            "user_hash_id": user_hash_id,
+                            "recommendations_count": len(recs)
+                        }
+                    )
+        except Exception as e:
+            # Don't fail the recommendation if history logging fails
+            logger.warning(
+                "Failed to log recommendation history",
+                extra={
+                    "request_id": request_id,
+                    "user_hash_id": user_hash_id,
+                    "error": str(e)
+                }
+            )
+
+        return ReaderRecommendResponse(
+            request_id=request_id,
+            user_hash_id=user_hash_id,
+            recommendations=recs,
+            duration_sec=round(total_duration, 3),
+            based_on_books=meta.get("based_on_books", []),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Reader recommendation request failed",
+            exc_info=True,
+            extra={"request_id": request_id},
+        )
+        raise HTTPException(500, "Failed to generate recommendations") from exc
+
+
+@app.get(
+    "/user/{user_hash_id}/books",
+    response_model=UserBooksResponse,
+    summary="Get user's uploaded books",
+    description="""
+    Retrieve the list of books uploaded by a specific Reader Mode user.
+    Includes book metadata and upload timestamps.
+    """,
+    responses={
+        200: {"description": "User books retrieved successfully"},
+        404: {"description": "User not found"},
+        500: {"description": "Failed to retrieve user books"},
+    },
+    tags=["reader-mode"],
+)
+async def get_user_books(
+    user_hash_id: str,
+    limit: int = Query(
+        100, ge=1, le=500, description="Maximum number of books to return"
+    ),
+    offset: int = Query(0, ge=0, description="Number of books to skip"),
+):
+    # Check if Reader Mode is enabled
+    if not settings.enable_reader_mode:
+        logger.warning("Reader Mode user books endpoint called but feature is disabled")
+        raise HTTPException(
+            status_code=404,
+            detail="Reader Mode is currently disabled. Set ENABLE_READER_MODE=true to enable this feature.",
+        )
+
+    """Get user's uploaded books."""
+    logger.info(
+        "User books request received",
+        extra={"user_hash_id": user_hash_id, "limit": limit, "offset": offset},
+    )
+
+    try:
+        async with engine.begin() as conn:
+            # Check if user exists
+            user_exists = await conn.execute(
+                text(
+                    "SELECT 1 FROM public_users WHERE hash_id = :user_hash_id LIMIT 1"
+                ),
+                {"user_hash_id": user_hash_id},
+            )
+            if not user_exists.fetchone():
+                raise HTTPException(404, f"User {user_hash_id} not found")
+
+            # Get user's books
+            books_result = await conn.execute(
+                text(
+                    """
+                    SELECT ub.id, ub.title, ub.author, ub.rating, ub.notes, ub.raw_payload, ub.created_at
+                    FROM uploaded_books ub
+                    JOIN public_users pu ON ub.user_id = pu.id
+                    WHERE pu.hash_id = :user_hash_id 
+                    ORDER BY ub.created_at DESC 
+                    LIMIT :limit OFFSET :offset
+                """
+                ),
+                {"user_hash_id": user_hash_id, "limit": limit, "offset": offset},
+            )
+
+            books = []
+            for row in books_result.fetchall():
+                raw_payload = row.raw_payload or {}
+                books.append(
+                    {
+                        "id": str(row.id),
+                        "title": row.title,
+                        "author": row.author,
+                        "rating": row.rating,
+                        "notes": row.notes,
+                        "genre": raw_payload.get("genre"),
+                        "isbn": raw_payload.get("isbn"),
+                        "reading_level": raw_payload.get("reading_level"),
+                        "uploaded_at": (
+                            row.created_at.isoformat() if row.created_at else None
+                        ),
+                    }
+                )
+
+            # Get total count
+            count_result = await conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*) 
+                    FROM uploaded_books ub
+                    JOIN public_users pu ON ub.user_id = pu.id
+                    WHERE pu.hash_id = :user_hash_id
+                """
+                ),
+                {"user_hash_id": user_hash_id},
+            )
+            total_count = count_result.fetchone()[0]
+
+            return UserBooksResponse(
+                user_hash_id=user_hash_id, books=books, total_count=total_count
+            )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Failed to retrieve user books",
+            exc_info=True,
+            extra={"user_hash_id": user_hash_id},
+        )
+        raise HTTPException(500, "Failed to retrieve user books") from exc
+
 
 class MetricCallbackHandler(AsyncCallbackHandler):
     """Collect per-run observability data."""
@@ -390,16 +1079,20 @@ class MetricCallbackHandler(AsyncCallbackHandler):
 
     async def on_tool_start(self, serialized, input_str, **kwargs):  # type: ignore[override]
         name = (
-            serialized.get("name", "unknown") if isinstance(serialized, dict) else "unknown"
+            serialized.get("name", "unknown")
+            if isinstance(serialized, dict)
+            else "unknown"
         )
         self.tools_used.append(name)
 
     async def on_tool_error(self, error, **kwargs):  # type: ignore[override]
-        self.error_count += 1 
+        self.error_count += 1
+
 
 # ---------------------------------------------------------------------------
 # Prometheus middleware (lightweight – no external deps beyond prometheus_client)
 # ---------------------------------------------------------------------------
+
 
 @app.middleware("http")
 async def _prometheus_middleware(request: Request, call_next):  # noqa: D401
@@ -422,6 +1115,40 @@ async def _prometheus_middleware(request: Request, call_next):  # noqa: D401
 
     return response
 
+
+@app.get("/llm-stats")
+async def get_llm_stats():
+    """Get LLM service statistics and performance metrics."""
+    try:
+        from common.llm_client import get_llm_client
+        
+        llm_client = get_llm_client()
+        stats = llm_client.get_stats()
+        
+        # Add health check info
+        health = await llm_client.health_check()
+        stats["health"] = health
+        
+        return {
+            "timestamp": time.time(),
+            "llm_service": stats
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get LLM stats: {e}")
+        return {
+            "timestamp": time.time(),
+            "error": str(e),
+            "llm_service": {
+                "status": "error",
+                "request_count": 0,
+                "success_count": 0,
+                "failure_count": 0,
+                "fallback_count": 0
+            }
+        }
+
+
 # ---------------------------------------------------------------------------
 # Script entry-point
 # ---------------------------------------------------------------------------
@@ -435,6 +1162,6 @@ if __name__ == "__main__":  # pragma: no cover
     uvicorn.run(
         "src.recommendation_api.main:app",
         host="127.0.0.1",
-        port=S.api_port,
+        port=S.recommendation_api_port,
         reload=False,
-    ) 
+    )

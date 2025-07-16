@@ -1,0 +1,83 @@
+# Docker Compose Override for Reader Mode Services
+# 
+# This file extends the base docker-compose.yml with Reader Mode specific configurations.
+# Use this file to enable/disable Reader Mode services without modifying the base configuration.
+#
+# Usage:
+#   docker-compose -f docker-compose.yml -f docker-compose.reader.yml up -d
+#   make reader-up  # Using the Makefile target
+#
+# Educational Notes:
+# - Override files allow feature-specific configurations
+# - Environment variables control service behavior
+# - Replica counts enable/disable services dynamically
+# - Port mappings expose services for development/testing
+
+version: '3.8'
+
+services:
+  # Reader Mode: User Book Upload Service
+  # Handles CSV/JSON uploads, validates data, enriches metadata
+  user_ingest_service:
+    ports:
+      - "8002:8000"  # Expose for direct API testing
+    environment:
+      - ENABLE_READER_MODE=true
+      - GOOGLE_BOOKS_API_KEY=${GOOGLE_BOOKS_API_KEY}  # For book enrichment
+      - OPENAI_REQUEST_TIMEOUT=30  # Longer timeout for enrichment
+    volumes:
+      - ./logs:/app/logs  # Mount logs for debugging
+    deploy:
+      replicas: 1  # Ensure service is running
+      resources:
+        limits:
+          memory: 512M  # Reasonable memory limit
+          cpus: '0.5'   # CPU limit for cost control
+
+  # Reader Mode: Feedback Processing Worker
+  # Processes user thumbs up/down feedback, updates recommendation scores
+  feedback_worker:
+    environment:
+      - ENABLE_READER_MODE=true
+      - FEEDBACK_BATCH_SIZE=100  # Process feedback in batches
+      - FEEDBACK_FLUSH_INTERVAL=10  # Flush to DB every 10 seconds
+    volumes:
+      - ./logs:/app/logs  # Mount logs for debugging
+    deploy:
+      replicas: 1  # Ensure service is running
+      resources:
+        limits:
+          memory: 256M  # Smaller memory footprint
+          cpus: '0.25'  # Lower CPU requirements
+
+  # Enhanced Recommendation API for Reader Mode
+  recommendation_api:
+    environment:
+      - ENABLE_READER_MODE=true
+      - GOOGLE_BOOKS_API_KEY=${GOOGLE_BOOKS_API_KEY}
+      - READER_MODE_CACHE_TTL=3600  # Cache reader recommendations for 1 hour
+    # No port override - uses base configuration
+
+  # Enhanced Streamlit UI with Reader Mode
+  streamlit_ui:
+    environment:
+      - ENABLE_READER_MODE=true
+      - STREAMLIT_READER_MODE_TITLE="📚 Personal Book Recommendations"
+    # No port override - uses base configuration
+
+  # Enhanced monitoring for Reader Mode services
+  prometheus:
+    volumes:
+      - ./prometheus.reader.yml:/etc/prometheus/prometheus.yml:ro  # Reader Mode metrics config
+    # No port override - uses base configuration
+
+# Reader Mode specific volumes
+volumes:
+  # Additional volume for Reader Mode data if needed
+  reader_data:
+    driver: local
+
+# Reader Mode specific networks (if needed for isolation)
+networks:
+  reader_network:
+    driver: bridge 

@@ -1,0 +1,119 @@
+# Prometheus Configuration for Reader Mode Services
+# 
+# This configuration extends the base monitoring with Reader Mode specific metrics.
+# It includes service discovery, health checks, and performance monitoring.
+#
+# Educational Notes:
+# - Short scrape intervals (5s) for real-time monitoring
+# - Service discovery using Docker networking
+# - Multiple job configurations for different service types
+# - Health check endpoints for service status
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  external_labels:
+    cluster: 'reader-mode'
+    environment: 'development'
+
+# Rule files for alerting (can be added later)
+rule_files:
+  # - "alert_rules.yml"
+
+# Scrape job configurations
+scrape_configs:
+  # Core Infrastructure Services
+  - job_name: 'infrastructure'
+    static_configs:
+      - targets:
+          - 'redis:6379'
+          - 'postgres:5432'
+          - 'kafka:9092'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+
+  # Core Application Services
+  - job_name: 'core_services'
+    static_configs:
+      - targets:
+          - 'ingestion_service:9000'
+          - 'recommendation_api:9000'
+          - 'streamlit_ui:8501'
+          - 'frontend:80'
+    metrics_path: '/metrics'
+    scrape_interval: 5s
+    scrape_timeout: 3s
+
+  # Reader Mode Services (New)
+  - job_name: 'reader_mode_services'
+    static_configs:
+      - targets:
+          - 'user_ingest_service:9000'
+          - 'feedback_worker:9000'
+    metrics_path: '/metrics'
+    scrape_interval: 5s
+    scrape_timeout: 3s
+    labels:
+      service_type: 'reader_mode'
+      feature_flag: 'enabled'
+
+  # Background Workers
+  - job_name: 'background_workers'
+    static_configs:
+      - targets:
+          - 'metrics_consumer:9000'
+          - 'log_consumer:9000'
+          - 'graph_refresher:9000'
+          - 'book_enrichment_worker:9000'
+          - 'book_vector_worker:9000'
+          - 'student_profile_worker:9000'
+          - 'student_embedding_worker:9000'
+          - 'similarity_worker:9000'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+
+  # Health Check Endpoints
+  - job_name: 'health_checks'
+    static_configs:
+      - targets:
+          - 'recommendation_api:8000'
+          - 'user_ingest_service:8000'
+          - 'streamlit_ui:8501'
+          - 'frontend:80'
+    metrics_path: '/health'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    labels:
+      check_type: 'health'
+
+  # Prometheus Self-Monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets:
+          - 'localhost:9090'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # Grafana Monitoring
+  - job_name: 'grafana'
+    static_configs:
+      - targets:
+          - 'grafana:3000'
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+# Alerting configuration (can be extended)
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # - alertmanager:9093  # Uncomment when alertmanager is added
+
+# Remote write configuration (for production)
+# remote_write:
+#   - url: "https://prometheus-remote-write-endpoint"
+#     basic_auth:
+#       username: "username"
+#       password: "password" 

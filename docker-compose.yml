@@ -122,6 +122,38 @@ services:
       redis:
         condition: service_healthy
 
+  # Production-ready LLM microservice with Redis caching, Kafka logging, and LangChain integration
+  llm_microservice:
+    build:
+      context: .
+      dockerfile: src/llm_microservice/Dockerfile
+    platform: linux/amd64
+    container_name: llm_microservice
+    env_file:
+      - .env
+    ports:
+      - "8001:8000"
+    environment:
+      - OPENAI_API_KEY
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4}
+      - REDIS_URL=redis://redis:6379
+      - KAFKA_BROKERS=kafka:9092
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - CACHE_TTL=${CACHE_TTL:-3600}
+      - MAX_RETRIES=${MAX_RETRIES:-3}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-30}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
 
 # Streamlit dashboard that teachers and students use to search the catalog and receive recommendations.
   streamlit_ui:
@@ -139,6 +171,84 @@ services:
       - "8501:8501"
     depends_on: [recommendation_api]
     
+  # React + Vite single-page application served via Nginx
+  frontend:
+    build:
+      context: ./src/react_ui
+    platform: linux/amd64
+    container_name: frontend
+    depends_on:
+      - recommendation_api
+    ports:
+      - "8080:80"
+    # No env vars needed; Nginx proxies /api/* to recommendation_api
+    # If you ever rename the backend service, update nginx.conf accordingly.
+    
+
+  # ---- READER MODE SERVICES ----
+  # Handles user book uploads (JSON/CSV), validates data, enriches metadata, and publishes events
+  user_ingest_service:
+    build:
+      context: .
+      dockerfile: src/user_ingest_service/Dockerfile
+    platform: linux/amd64
+    container_name: user_ingest_service
+    env_file:
+      - .env
+    ports:
+      - "8004:8004"
+    environment:
+      - OPENAI_API_KEY
+      - OPENAI_MODEL=${OPENAI_MODEL}
+      - DB_URL=${DB_URL}
+      - KAFKA_BROKERS=${KAFKA_BROKERS}
+      - REDIS_URL=${REDIS_URL}
+      - ENABLE_READER_MODE=${ENABLE_READER_MODE}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: ${ENABLE_READER_MODE:-1}
+
+  # Processes user feedback events, updates database, and maintains recommendation scoring
+  feedback_worker:
+    build:
+      context: .
+      dockerfile: src/feedback_worker/Dockerfile
+    platform: linux/amd64
+    container_name: feedback_worker
+    env_file:
+      - .env
+    environment:
+      - DB_URL=${DB_URL}
+      - KAFKA_BROKERS=${KAFKA_BROKERS}
+      - REDIS_URL=${REDIS_URL}
+      - ENABLE_READER_MODE=${ENABLE_READER_MODE}
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "python"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: ${ENABLE_READER_MODE:-1}
 
   
   # Kafka consumer that aggregates metrics events for monitoring and performance dashboards.
@@ -197,6 +307,7 @@ services:
         condition: service_healthy
 
   # Enriches catalog entries with external metadata (e.g., Google Books, Open Library) and readability scores.
+  # Enhanced with priority-based processing, retry logic, and comprehensive status tracking.
   book_enrichment_worker:
     build:
       context: .
@@ -209,6 +320,17 @@ services:
       - ./data:/app/data
     environment:
       - OPENAI_API_KEY
+      # Enrichment system configuration
+      - ENRICHMENT_BATCH_SIZE=50
+      - ENRICHMENT_BATCH_INTERVAL=30
+      - ENRICHMENT_MAX_RETRIES_CRITICAL=5
+      - ENRICHMENT_MAX_RETRIES_HIGH=3
+      - ENRICHMENT_MAX_RETRIES_LOW=2
+      - ENRICHMENT_RATE_LIMIT_CRITICAL=0.1
+      - ENRICHMENT_RATE_LIMIT_HIGH=0.2
+      - ENRICHMENT_RATE_LIMIT_LOW=0.5
+      - ENRICHMENT_API_TIMEOUT=10
+      - OPENLIBRARY_BASE_URL=https://openlibrary.org
     depends_on:
       postgres:
         condition: service_healthy

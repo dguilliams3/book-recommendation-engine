@@ -8,7 +8,7 @@ from testcontainers.postgres import PostgresContainer
 
 # Patch targets -----------------------------------------------------------------
 import common.kafka_utils as kafka_utils
-from common.settings import SettingsInstance as S
+from common.settings import settings as S
 from langchain_openai import OpenAIEmbeddings
 
 from ingestion_service.pipeline import run_ingestion
@@ -75,6 +75,17 @@ def _patch_external_dependencies(monkeypatch, tmp_path):
 # Tests
 # -----------------------------------------------------------------------------
 
+import pytest
+import os
+
+pytestmark = pytest.mark.integration
+
+skip_integration = pytest.mark.skipif(
+    os.name == 'nt' and not os.environ.get('RUN_INTEGRATION'),
+    reason="Integration tests require Docker and are skipped on Windows unless RUN_INTEGRATION=1"
+)
+
+@skip_integration
 @pytest.mark.asyncio
 async def test_run_ingestion_writes_catalog(pg_container):
     """End-to-end: the pipeline should insert catalog rows and create a FAISS index."""
@@ -100,6 +111,7 @@ async def test_run_ingestion_writes_catalog(pg_container):
     assert index_file.exists(), "FAISS index file was not created"
 
 
+@skip_integration
 @pytest.mark.asyncio
 async def test_graph_refresher_creates_similarity_edges(pg_container):
     """Running the graph refresher should populate student_embeddings and student_similarity."""
@@ -124,12 +136,14 @@ async def test_graph_refresher_creates_similarity_edges(pg_container):
     assert sim_cnt and sim_cnt > 0, "Student similarity edges not created"
 
 
+@skip_integration
 def test_basic_import():
     # Try importing ingestion components
     from ingestion_service.db_utils import insert_books
     assert insert_books
 
 
+@skip_integration
 @pytest.mark.asyncio
 async def test_book_embedding_flow(tmp_path, monkeypatch):
     """End-to-end test of book ingestion → FAISS embedding → graph."""

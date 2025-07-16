@@ -1,7 +1,11 @@
+# General
 venv/
 .env
 archive/
-data/vector_store/*
+*.md
+!README.md
+docs/
+data/vector_store/
 
 # Caching and bytecode
 __pycache__/
@@ -14,6 +18,3 @@ __pycache__/
 *.pywz
 *.pyzw
 *.pyzwz
-
-# Heavy Data
-data/vector_store/
