@@ -6,6 +6,7 @@ archive/
 !README.md
 docs/
 data/vector_store/
+data/raw_openlibrary/
 
 # Caching and bytecode
 __pycache__/
