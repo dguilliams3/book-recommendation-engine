@@ -627,7 +627,7 @@ else:
 def main():
     logger.info("Starting Streamlit UI")
     
-    st.title("📚 Elementary School Book Recommender")
+    st.title("📚 Book Recommendation Engine")
 
     # Create tabs for different sections
     tab1, tab2, tab3, tab4 = st.tabs(
