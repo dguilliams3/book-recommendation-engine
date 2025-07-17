@@ -8,6 +8,9 @@ docs/
 data/vector_store/
 data/raw_openlibrary/
 
+# Containerization workspace (isolated from main project)
+containerization_workspace/
+
 # Caching and bytecode
 __pycache__/
 **/__pycache__/

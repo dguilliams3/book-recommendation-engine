@@ -535,8 +535,9 @@ async def enrich_book_metadata(
         "reading_level": "Estimated grade level as a number (e.g., 4.5)",
         "genre": "Primary genre classification",
         "isbn": "ISBN if you can identify it, otherwise null",
+        "page_count": "Number of pages as an integer, or null if unknown",
         "confidence": "Confidence score 0-1 for the enrichment",
-        "notes": "Any relevant notes about the enrichment process"
+        "notes": "Brief summary of enrichment changes made (e.g., 'Corrected title typo, estimated reading level, classified as Fantasy, added page count')"
     }}
     
     Focus on:
@@ -544,6 +545,8 @@ async def enrich_book_metadata(
     2. Estimating appropriate reading level if missing
     3. Classifying the genre if not provided
     4. Being conservative with confidence scores
+    5. Providing clear, concise notes about what was enriched
+    6. Estimating or extracting page count if possible.
     """
     
     system_prompt = """You are an expert librarian helping to standardize and enrich book metadata. 

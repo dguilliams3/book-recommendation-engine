@@ -9,7 +9,7 @@ class RecommendationFlattener(Flattener):
     def __call__(self, row: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         text = (
             f"On {row.get('recommended_at')}, recommended book {row.get('book_id')} "
-            f"to student {row.get('student_id')}"
+            f"to user {row.get('user_id')}"
         )
-        meta = {"student_id": row.get("student_id"), "book_id": row.get("book_id")}
+        meta = {"user_id": row.get("user_id"), "book_id": row.get("book_id")}
         return text, meta

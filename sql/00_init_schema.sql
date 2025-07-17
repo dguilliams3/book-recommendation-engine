@@ -117,24 +117,27 @@ CREATE TABLE IF NOT EXISTS student_profile_cache (
     last_event UUID
 );
 
--- Recommendation history for deduplication and tracking
+-- Recommendation history for deduplication and tracking (unified for both student and reader modes)
 CREATE TABLE IF NOT EXISTS recommendation_history (
-    student_id TEXT REFERENCES students(student_id),
+    user_id TEXT NOT NULL,  -- student_id for students, UUID for readers
     book_id TEXT REFERENCES catalog(book_id),
     recommended_at TIMESTAMP DEFAULT NOW(),
     justification TEXT,
-    PRIMARY KEY (student_id, book_id)
+    request_id TEXT,
+    algorithm_used TEXT,
+    score NUMERIC(3,2) DEFAULT 1.0,
+    metadata JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (user_id, book_id)
 );
 
--- ====================================================================
--- MIGRATION SAFETY: Ensure existing tables have correct structure
--- ====================================================================
+-- Create indexes for the unified table
+CREATE INDEX IF NOT EXISTS idx_rec_history_user_id ON recommendation_history(user_id);
+CREATE INDEX IF NOT EXISTS idx_rec_history_book_id ON recommendation_history(book_id);
+CREATE INDEX IF NOT EXISTS idx_rec_history_created_at ON recommendation_history(created_at);
+CREATE INDEX IF NOT EXISTS idx_rec_history_request_id ON recommendation_history(request_id);
 
--- Add missing columns if they don't exist (for backwards compatibility)
-ALTER TABLE student_embeddings ADD COLUMN IF NOT EXISTS last_event UUID;
-ALTER TABLE book_embeddings ADD COLUMN IF NOT EXISTS last_event UUID;
-ALTER TABLE student_similarity ADD COLUMN IF NOT EXISTS last_event UUID;
-ALTER TABLE student_profile_cache ADD COLUMN IF NOT EXISTS last_event UUID;
+
 
 -- ====================================================================
 -- PERFORMANCE INDEXES
@@ -186,7 +189,8 @@ CREATE TABLE IF NOT EXISTS uploaded_books (
     title TEXT,
     author TEXT,
     rating SMALLINT,  -- 1-5 user rating
-    notes TEXT,
+    notes TEXT,  -- User's personal notes
+    enrichment_notes TEXT,  -- LLM enrichment process notes
     raw_payload JSON,  -- Original upload data
     created_at TIMESTAMPTZ DEFAULT NOW(),
     
@@ -195,7 +199,11 @@ CREATE TABLE IF NOT EXISTS uploaded_books (
     genre VARCHAR(100) DEFAULT 'General',
     reading_level NUMERIC(3,1) DEFAULT 5.0,
     read_date DATE,
-    confidence NUMERIC(3,2) DEFAULT 0.0  -- LLM confidence score (0-1)
+    confidence NUMERIC(3,2) DEFAULT 0.0,  -- LLM confidence score (0-1)
+    
+    -- Enrichment tracking columns
+    enrichment_attempts INTEGER DEFAULT 0,  -- Number of enrichment attempts made
+    enrichment_status VARCHAR(20) DEFAULT 'pending'  -- pending, in_progress, enriched, failed, max_attempts_reached, duplicate
 );
 
 -- Reader Mode feedback on recommendations

@@ -1110,7 +1110,7 @@ async def _get_recently_recommended_books(user_hash_id: str, conn, hours: int = 
                 """
                 SELECT DISTINCT rh.book_id 
                 FROM recommendation_history rh
-                JOIN public_users pu ON rh.user_id = pu.id
+                JOIN public_users pu ON rh.user_id = pu.id::text
                 WHERE pu.hash_id = :user_hash_id 
                 AND rh.created_at > NOW() - INTERVAL '24 hours'
                 """

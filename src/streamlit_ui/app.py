@@ -831,6 +831,9 @@ def main():
                                                 f"🎉 Successfully uploaded {result.get('books_processed', len(books))} books!"
                                             )
                                             st.info(
+                                                "🔄 Metadata enrichment is happening in the background - your books will be enhanced with additional details shortly."
+                                            )
+                                            st.info(
                                                 "💡 Now go to the 'Get Recommendations' tab to see your personalized suggestions."
                                             )
 

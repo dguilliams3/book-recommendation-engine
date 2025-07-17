@@ -14,6 +14,7 @@ from sqlalchemy import (
     SmallInteger,
     ForeignKey,
     Index,
+    Numeric,
 )
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.sql import func
@@ -115,14 +116,19 @@ class StudentProfileCache(Base):
 
 
 class RecommendationHistory(Base):
-    """Recommendation history for deduplication and tracking"""
+    """Recommendation history for deduplication and tracking (unified for both student and reader modes)"""
 
     __tablename__ = "recommendation_history"
 
-    student_id = Column(String, ForeignKey("students.student_id"), primary_key=True)
+    user_id = Column(String, primary_key=True)  # student_id for students, UUID for readers
     book_id = Column(String, ForeignKey("catalog.book_id"), primary_key=True)
     recommended_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     justification = Column(Text)
+    request_id = Column(String)
+    algorithm_used = Column(String)
+    score = Column(Numeric(3, 2), default=1.0)
+    rec_metadata = Column(JSONB)  # Renamed from metadata to avoid conflict
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
 
 # ====================================================================
@@ -150,7 +156,8 @@ class UploadedBook(Base):
     title = Column(Text)
     author = Column(Text)
     rating = Column(SmallInteger)  # 1-5 user rating
-    notes = Column(Text)
+    notes = Column(Text)  # User's personal notes
+    enrichment_notes = Column(Text)  # LLM enrichment process notes
     raw_payload = Column(JSON)  # Original upload data
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     
@@ -160,6 +167,10 @@ class UploadedBook(Base):
     reading_level = Column(Float, default=5.0)  # Using Float instead of DECIMAL for SQLAlchemy
     read_date = Column(Date)
     confidence = Column(Float, default=0.0)  # LLM confidence score (0-1)
+    
+    # Enrichment tracking columns
+    enrichment_attempts = Column(Integer, default=0)  # Number of enrichment attempts made
+    enrichment_status = Column(String(20), default="pending")  # pending, in_progress, enriched, failed, max_attempts_reached
 
 
 class Feedback(Base):

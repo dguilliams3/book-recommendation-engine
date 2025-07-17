@@ -199,16 +199,21 @@ async def _ensure_tables():
     try:
         async with engine.begin() as conn:
             await conn.run_sync(db_models.Base.metadata.create_all)
-            # Additional idempotent DDL for recommendation_history with composite PK
+            # Additional idempotent DDL for unified recommendation_history
             await conn.execute(
                 text(
                     """
                 CREATE TABLE IF NOT EXISTS recommendation_history (
-                    student_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,  -- student_id for students, UUID for readers
                     book_id TEXT NOT NULL,
                     recommended_at TIMESTAMPTZ DEFAULT NOW(),
                     justification TEXT,
-                    PRIMARY KEY (student_id, book_id)
+                    request_id TEXT,
+                    algorithm_used TEXT,
+                    score NUMERIC(3,2) DEFAULT 1.0,
+                    metadata JSONB,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (user_id, book_id)
                 );
                 """
                 )
@@ -710,6 +715,59 @@ async def recommend(
 
         total_duration = time.perf_counter() - started
 
+        # Log recommendation history to database for student mode
+        try:
+            async with engine.begin() as conn:
+                # Insert each recommendation into unified recommendation_history
+                for rec in recs:
+                    await conn.execute(
+                        text("""
+                            INSERT INTO recommendation_history 
+                            (user_id, book_id, request_id, algorithm_used, score, metadata, created_at, justification)
+                            VALUES (:user_id, :book_id, :request_id, :algorithm, :score, :metadata, NOW(), :justification)
+                            ON CONFLICT (user_id, book_id) DO UPDATE SET
+                                request_id = EXCLUDED.request_id,
+                                algorithm_used = EXCLUDED.algorithm_used,
+                                score = EXCLUDED.score,
+                                metadata = EXCLUDED.metadata,
+                                created_at = EXCLUDED.created_at,
+                                justification = EXCLUDED.justification
+                        """),
+                        {
+                            "user_id": student_id,  # Use student_id as user_id for students
+                            "book_id": rec.book_id,
+                            "request_id": request_id,
+                            "algorithm": "student_agent" if "agent" in meta.get("tools", []) else "student_traditional",
+                            "score": 1.0,  # Default confidence score
+                            "metadata": json.dumps({
+                                "query": query,
+                                "justification": rec.justification,
+                                "reading_level": rec.reading_level,
+                                "generation_method": meta.get("tools", []),
+                                "student_avg_level": meta.get("student_avg_level")
+                            }),
+                            "justification": rec.justification
+                        }
+                    )
+                logger.info(
+                    "Student recommendation history logged",
+                    extra={
+                        "request_id": request_id,
+                        "student_id": student_id,
+                        "recommendations_count": len(recs)
+                    }
+                )
+        except Exception as e:
+            # Don't fail the recommendation if history logging fails
+            logger.warning(
+                "Failed to log student recommendation history",
+                extra={
+                    "request_id": request_id,
+                    "student_id": student_id,
+                    "error": str(e)
+                }
+            )
+
         asyncio.create_task(
             push_metric(
                 "recommendation_served",
@@ -952,16 +1010,23 @@ async def get_reader_recommendations(
                 if user_row:
                     user_uuid = user_row.id
                     
-                    # Insert each recommendation into history
+                    # Insert each recommendation into unified recommendation_history
                     for rec in recs:
                         await conn.execute(
                             text("""
                                 INSERT INTO recommendation_history 
-                                (user_id, book_id, request_id, algorithm_used, score, metadata, created_at)
-                                VALUES (:user_id, :book_id, :request_id, :algorithm, :score, :metadata, NOW())
+                                (user_id, book_id, request_id, algorithm_used, score, metadata, created_at, justification)
+                                VALUES (:user_id, :book_id, :request_id, :algorithm, :score, :metadata, NOW(), :justification)
+                                ON CONFLICT (user_id, book_id) DO UPDATE SET
+                                    request_id = EXCLUDED.request_id,
+                                    algorithm_used = EXCLUDED.algorithm_used,
+                                    score = EXCLUDED.score,
+                                    metadata = EXCLUDED.metadata,
+                                    created_at = EXCLUDED.created_at,
+                                    justification = EXCLUDED.justification
                             """),
                             {
-                                "user_id": user_uuid,
+                                "user_id": str(user_uuid),
                                 "book_id": rec.book_id,
                                 "request_id": request_id,
                                 "algorithm": "reader_semantic_search" if "semantic_search" in meta.get("tools", []) else "reader_traditional",
@@ -971,11 +1036,12 @@ async def get_reader_recommendations(
                                     "justification": rec.justification,
                                     "reading_level": rec.reading_level,
                                     "generation_method": meta.get("tools", [])
-                                })
+                                }),
+                                "justification": rec.justification
                             }
                         )
                     logger.info(
-                        "Recommendation history logged",
+                        "Reader recommendation history logged",
                         extra={
                             "request_id": request_id,
                             "user_hash_id": user_hash_id,
@@ -985,7 +1051,7 @@ async def get_reader_recommendations(
         except Exception as e:
             # Don't fail the recommendation if history logging fails
             logger.warning(
-                "Failed to log recommendation history",
+                "Failed to log reader recommendation history",
                 extra={
                     "request_id": request_id,
                     "user_hash_id": user_hash_id,

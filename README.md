@@ -199,6 +199,12 @@ REDIS_URL=redis://redis:6379/0
 # Kafka Configuration
 KAFKA_BROKERS=kafka:9092
 
+# Enrichment Configuration
+MAX_ENRICHMENT_ATTEMPTS=3         # Maximum enrichment attempts per book
+ENRICHMENT_RETRY_DELAY_BASE=2.0   # Base delay for exponential backoff (seconds)
+ENRICHMENT_RETRY_DELAY_MAX=60.0   # Maximum delay between retries (seconds)
+ENRICHMENT_TIMEOUT=30.0           # Timeout for enrichment requests (seconds)
+
 # ML Hyperparameters
 SIMILARITY_THRESHOLD=0.75          # Student similarity cutoff
 HALF_LIFE_DAYS=45                 # Recommendation decay factor

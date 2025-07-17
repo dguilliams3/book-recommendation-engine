@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     llm_circuit_breaker_threshold: int = Field(5, validation_alias="LLM_CIRCUIT_BREAKER_THRESHOLD")
     llm_circuit_breaker_timeout: int = Field(60, validation_alias="LLM_CIRCUIT_BREAKER_TIMEOUT")
 
+    # Enrichment Configuration
+    max_enrichment_attempts: int = Field(3, validation_alias="MAX_ENRICHMENT_ATTEMPTS")  # Maximum enrichment attempts per book
+    enrichment_retry_delay_base: float = Field(2.0, validation_alias="ENRICHMENT_RETRY_DELAY_BASE")  # Base delay for exponential backoff (seconds)
+    enrichment_retry_delay_max: float = Field(60.0, validation_alias="ENRICHMENT_RETRY_DELAY_MAX")  # Maximum delay between retries (seconds)
+    enrichment_timeout: float = Field(30.0, validation_alias="ENRICHMENT_TIMEOUT")  # Timeout for enrichment requests (seconds)
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # If legacy DB_URL is provided, it takes precedence
