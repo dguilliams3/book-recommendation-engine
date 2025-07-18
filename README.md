@@ -1,5 +1,5 @@
 # AI-Powered Book Recommendation Engine
-*Production-Grade Distributed System for Elementary Education*
+*Production-Grade Distributed System for User-Facing Recommendations*
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com)
@@ -7,9 +7,11 @@
 [![OpenAI](https://img.shields.io/badge/OpenAI-GPT--4o-orange.svg)](https://openai.com)
 [![Kafka](https://img.shields.io/badge/Apache-Kafka-red.svg)](https://kafka.apache.org)
 
+**Live Application:** [books.danguilliams.com](https://books.danguilliams.com)
+
 ## 🎯 Overview
 
-A **sophisticated microservices architecture** delivering personalized book recommendations to elementary students through AI-powered semantic matching, collaborative filtering, and real-time preference learning. Built for production scalability with enterprise-grade monitoring, event-driven processing, and advanced ML pipelines.
+A **sophisticated microservices architecture** delivering personalized book recommendations to real users (with a demo using hypothetical elementary students) through AI-powered semantic matching, collaborative filtering, and real-time preference learning. Built for production scalability with enterprise-grade monitoring, event-driven processing, and advanced ML pipelines.
 
 ### 🏆 Key Achievements
 - **12+ Microservices** orchestrated via Docker Compose with full observability
@@ -19,7 +21,7 @@ A **sophisticated microservices architecture** delivering personalized book reco
 - **Vector Similarity Search** using FAISS + OpenAI embeddings for semantic matching
 - **MCP Tool Integration** providing 7+ specialized tools for educational workflows, easy to enhanve with additional tools
 - **Production Monitoring** with Prometheus metrics, structured logging, and health checks
-- **Sub-second Response Times** through Redis caching and incremental processing
+- **Sub-second Response Times** for non-agent processes through Redis caching and incremental processing
 
 ---
 
